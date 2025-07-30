@@ -1,29 +1,44 @@
 # --- 📁 backend/main.py ---
 
-import base64
-import io
+# --- 📁 backend/main.py ---
+
+# 기존 import 문들을 아래 내용으로 완전히 교체하세요.
+
+import base64, io, uuid, threading, smtplib, pytz, cv2, time, numpy as np
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.sessions import SessionMiddleware
-from fastapi.security import OAuth2PasswordRequestForm
-from jose import jwt
-from passlib.context import CryptContext
-from sqlalchemy import Column, Integer, String, DateTime, create_engine, func, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from sqladmin import Admin, ModelView
-from sqladmin.authentication import AuthenticationBackend
-from pydantic import BaseModel
+from pathlib import Path
 from PIL import Image
-import numpy as np
-from ultralytics import YOLO
-from db import SessionLocal, init_db
-from models import Analysis
-import pytz, smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+# FastAPI 및 관련 라이브러리
+from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordRequestForm
+
+# 인증 관련 라이브러리
 from jose import jwt, JWTError
+from passlib.context import CryptContext
+
+# SQLAlchemy 관련 import 문 추가
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, func
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.ext.declarative import declarative_base
+
+# SQLAdmin 관련 import 문 추가
+from sqladmin import Admin, ModelView
+from sqladmin.authentication import AuthenticationBackend
+
+# Pydantic 및 YOLO
+from pydantic import BaseModel
+from ultralytics import YOLO
+
+# 로컬 DB 및 모델 초기화
+from db import SessionLocal, init_db
+from models import User, Analysis
 
 init_db()
 # --- 한국 시간 설정 ---
@@ -153,20 +168,21 @@ admin.add_view(UserAdmin)
 admin.add_view(AnalysisAdmin)
 
 origins = [
-    "http://localhost:5173",  # Vite/React 개발 서버
+    "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "http://192.168.0.48:5173", # 실제 사용중인 로컬 IP
+    "http://192.168.0.48:5173",
 ]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+
+# 동영상 임시 저장 폴더 설정 (한 번만 선언)
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
+RESULTS_DIR.mkdir(exist_ok=True)
+app.mount("/results", StaticFiles(directory=RESULTS_DIR), name="results")
+
+# 작업 상태 임시 저장소
+tasks = {}
+
 # --- DB 세션 종속성 ---
 def get_db():
     db = SessionLocal()
@@ -176,7 +192,16 @@ def get_db():
         db.close()
 
 # --- YOLO 로드 ---
-model = YOLO("yolov8s.pt")
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = BASE_DIR / "best.pt"
+
+try:
+    model = YOLO(MODEL_PATH)
+    print("✅ YOLO 모델 로딩 성공!")
+except Exception as e:
+    print(f"❌ YOLO 모델 로딩 실패: {e}")
+    # 모델 로딩에 실패하면 서버가 시작되지 않도록 처리할 수도 있습니다.
+    model = None
 
 KOREAN_CLASSES = {
     "freshripe": "신선한 완숙",
@@ -187,41 +212,83 @@ KOREAN_CLASSES = {
     "unripe": "미숙"
 }
 
-# --- 분석 함수 ---
+# --- YOLO 분석 함수 (여러 객체 지원) ---
 def run_yolo_model(image: Image.Image):
+    """
+    이미지에서 감지된 모든 바나나 객체의 정보를 리스트로 반환합니다.
+    감지된 객체가 없으면 빈 리스트를 반환합니다.
+    """
+    if not model:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="모델을 사용할 수 없습니다.")
+
     img_array = np.array(image)
-    results = model(img_array)[0]
-    if not results.boxes:
-        raise ValueError("감지된 바운딩 박스가 없습니다.")
+    results = model(img_array, verbose=False)[0]
+    
+    analysis_results = []
+    VALID_CLASSES = {"ripe", "unripe", "freshripe", "freshunripe", "overripe", "rotten"}
 
-    best_idx = results.boxes.conf.argmax().item()
-    box = results.boxes[best_idx]
-    cls_id = int(box.cls.item())
-    cls_name = model.names[cls_id]
-    ko_cls_name = KOREAN_CLASSES.get(cls_name, cls_name)
-    conf = float(box.conf.item())
+    if results.boxes:
+        for box in results.boxes:
+            cls_name = model.names[int(box.cls.item())]
+            
+            # ✅ 감지된 객체가 바나나 종류일 경우에만 결과에 추가
+            if cls_name in VALID_CLASSES:
+                conf = float(box.conf.item())
+                x1, y1, x2, y2 = box.xyxy[0]
+                
+                bbox = {
+                    "x": round(x1.item() / image.width, 4),
+                    "y": round(y1.item() / image.height, 4),
+                    "width": round((x2 - x1).item() / image.width, 4),
+                    "height": round((y2 - y1).item() / image.height, 4),
+                }
+                
+                analysis_results.append({
+                    "ripeness": KOREAN_CLASSES.get(cls_name, cls_name),
+                    "confidence": round(conf, 3),
+                    "boundingBox": bbox
+                })
+                
+    return analysis_results
 
-    x1, y1, x2, y2 = box.xyxy[0]
-    img_w, img_h = image.size
-    bbox = {
-        "x": round(x1.item() / img_w, 3),
-        "y": round(y1.item() / img_h, 3),
-        "width": round((x2.item() - x1.item()) / img_w, 3),
-        "height": round((y2.item() - y1.item()) / img_h, 3),
-    }
-    result = {
-        "ripeness": ko_cls_name,
-        "confidence": round(conf, 3),
-        "boundingBox": bbox
-    }
-    # 결과 DB에 저장
-    db = SessionLocal()
-    db_result = Analysis(ripeness=ko_cls_name, confidence=conf)
-    db.add(db_result)
-    db.commit()
-    db.close()
-
-    return result
+# --- 🔑 인증 의존성 ---
+async def get_current_user(Authorization: str = Header(None), db: Session = Depends(get_db)):
+    """
+    요청 헤더의 Authorization 필드에서 Bearer 토큰을 파싱하고 유저를 반환합니다.
+    """
+    if Authorization is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="인증 토큰이 필요합니다.",
+        )
+        
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="자격 증명을 확인할 수 없습니다.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        # "Bearer " 접두사가 있는지 확인하고 제거합니다.
+        token_prefix = "Bearer "
+        if not Authorization.startswith(token_prefix):
+            raise credentials_exception
+        
+        token = Authorization[len(token_prefix):]
+        
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+            
+    except JWTError:
+        raise credentials_exception
+    
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise credentials_exception
+        
+    return user
 
 # --- 📝 회원가입 ---
 @app.post("/signup")
@@ -301,27 +368,143 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     access_token = jwt.encode({"sub": user.email, "nickname": user.nickname}, SECRET_KEY, algorithm=ALGORITHM)
     return {"access_token": access_token, "token_type": "bearer"}
 
-# --- 🔍 이미지 분석 후 DB 저장 ---
-@app.post("/analyze")
-def analyze(payload: ImagePayload, db: Session = Depends(get_db)):
+# --- 📹 비동기 작업 및 동영상 생성 ---
+# main.py 파일에서 이 함수를 찾아서 아래 내용으로 덮어쓰세요.
+import time # time 라이브러리가 import 되어 있는지 확인해주세요.
+
+def create_analysis_video(task_id: str, image_data_list: list):
+    """
+    여러 이미지를 받아 스크롤링 분석 비디오를 만드는 백그라운드 작업 함수.
+    [최종 수정] Pillow를 이용한 매우 안정적인 이미지 처리 파이프라인 적용.
+    """
+    try:
+        tasks[task_id] = {"status": "PROCESSING", "result": None}
+        print(f"[{task_id}] 비디오 생성 시작...")
+        
+        output_width, output_height, fps = 640, 480, 15
+        
+        resized_imgs = [cv2.resize(img, (output_width, output_height)) for img in resized_imgs if img is not None]
+        for index, b64_data in enumerate(image_data_list):
+            try:
+                img_data = base64.b64decode(b64_data)
+                
+                # 1단계: Pillow로 이미지를 열고 RGB로 표준화
+                pil_image = Image.open(io.BytesIO(img_data)).convert("RGB")
+                
+                # 2단계: Pillow 이미지를 NumPy 배열로 변환
+                # PIL(RGB) -> OpenCV(BGR) 색상 순서 변환
+                cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                
+                resized_imgs.append(cv2.resize(cv_image, (output_width, output_height)))
+            except Exception as img_err:
+                # 특정 이미지 처리 실패 시 로그를 남기고 건너뜀
+                print(f"[{task_id}] 경고: {index+1}번째 이미지 처리 실패. 건너뜁니다. 오류: {img_err}")
+                continue
+
+        if not resized_imgs:
+            raise ValueError("유효한 이미지가 없습니다.")
+        print(f"[{task_id}] {len(resized_imgs)}개 이미지 리사이즈 및 표준화 완료.")
+
+        long_img = np.hstack(resized_imgs)
+        if long_img.shape[1] <= output_width:
+            raise ValueError("비디오를 만들기에 이미지가 충분하지 않습니다.")
+
+        temp_video_path = RESULTS_DIR / f"{task_id}_temp.mp4"
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(str(temp_video_path), fourcc, fps, (output_width, output_height))
+        
+        total_frames = fps * 10
+        for i in range(total_frames):
+            start_x = int((long_img.shape[1] - output_width) * (i / (total_frames - 1)))
+            end_x = start_x + output_width
+            if end_x > long_img.shape[1]:
+                end_x = long_img.shape[1]
+                start_x = end_x - output_width
+            frame = long_img[:, start_x:end_x]
+            video_writer.write(frame)
+        video_writer.release()
+        print(f"[{task_id}] 임시 비디오 생성 완료: {temp_video_path}")
+        time.sleep(0.5)
+
+        cap = cv2.VideoCapture(str(temp_video_path))
+        if not cap.isOpened():
+             raise IOError(f"생성된 임시 비디오 파일({temp_video_path})을 열 수 없습니다.")
+        
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        print(f"[{task_id}] 임시 비디오에서 {frame_count}개 프레임 읽기 시작...")
+        final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
+        final_writer = cv2.VideoWriter(str(final_video_path), fourcc, fps, (output_width, output_height))
+        
+        processed_frames = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret: break
+            if model:
+                results = model(frame, verbose=False)
+                final_writer.write(results[0].plot())
+            else:
+                final_writer.write(frame)
+            processed_frames += 1
+        
+        print(f"[{task_id}] {processed_frames}/{frame_count}개 프레임 처리 완료.")
+        cap.release()
+        final_writer.release()
+        temp_video_path.unlink()
+
+        tasks[task_id] = {"status": "SUCCESS", "result": f"/results/{final_video_path.name}"}
+        print(f"[{task_id}] ✅ 최종 비디오 생성 성공: {final_video_path.name}")
+
+    except Exception as e:
+        tasks[task_id] = {"status": "FAILURE", "result": str(e)}
+        print(f"[{task_id}] ❌ 비디오 생성 실패: {e}")
+
+# --- 📍 라우터 분리 ---
+auth_router = APIRouter(tags=["Authentication"])
+analysis_router = APIRouter(tags=["Analysis"], dependencies=[Depends(get_current_user)])
+task_router = APIRouter(tags=["Tasks"])
+stats_router = APIRouter(tags=["Statistics"])
+
+# --- 분석 라우터 (모든 API에 인증 필요) ---
+@analysis_router.post("/analyze", response_model=list[YoloAnalysisResult])
+def analyze_single_image(payload: ImagePayload, current_user: User = Depends(get_current_user)):
+    if not model:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="모델이 현재 사용할 수 없습니다.")
     try:
         image_data = base64.b64decode(payload.image)
         image = Image.open(io.BytesIO(image_data)).convert("RGB")
-        result = run_yolo_model(image)
-
-        db.add(Analysis(
-            username="anonymous",
-            ripeness=result['ripeness'],
-            confidence=result['confidence']
-        ))
-        db.commit()
+        result = run_yolo_model(image) # 기존에 만들어둔 분석 함수 호출
         return result
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"이미지 분석 중 오류 발생: {e}")
 
-# --- 📊 통계 API ---
-@app.get("/stats", response_model=StatsResponse)
-def stats(db: Session = Depends(get_db)):
+@analysis_router.post("/analyze_video")
+async def start_video_analysis(request: Request, current_user: User = Depends(get_current_user)):
+    data = await request.json()
+    images = data.get("images", [])
+    if len(images) < 2:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="동영상 분석을 위해서는 2장 이상의 이미지가 필요합니다.")
+    
+    task_id = str(uuid.uuid4())
+    tasks[task_id] = {"status": "PENDING", "result": None}
+    
+    thread = threading.Thread(target=create_analysis_video, args=(task_id, images))
+    thread.start()
+    
+    return {"task_id": task_id}
+
+# --- 작업 상태 확인 라우터 (인증 필요 없음) ---
+@task_router.get("/tasks/{task_id}/status")
+async def get_task_status(task_id: str):
+    task = tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾을 수 없습니다.")
+    return task
+
+# --- 통계 라우터 ---
+@stats_router.get("/stats", response_model=StatsResponse)
+def get_stats(db: Session = Depends(get_db)):
     total = db.query(Analysis).count()
     today = datetime.now(KST).date()
     today_count = db.query(Analysis).filter(Analysis.created_at >= today).count()
@@ -333,38 +516,23 @@ def stats(db: Session = Depends(get_db)):
     label_score = {"미숙": 1, "신선한 미숙": 2, "완숙": 3, "신선한 완숙": 4, "과숙": 5, "썩음": 6}
     avg_score = sum([label_score.get(a.ripeness, 0) for a in all_records]) / len(all_records)
 
-    return {
-        "todayAnalyses": today_count,
-        "avgRipeness": round(avg_score, 2),
-        "totalUploads": total
-    }
+    return {"todayAnalyses": today_count, "avgRipeness": round(avg_score, 2), "totalUploads": total}
 
-router = APIRouter()
-
-@router.get("/stats/summary")
-def get_summary():
+@stats_router.get("/stats/summary")
+def get_summary_stats():
     db = SessionLocal()
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
-
     total = db.query(func.count(Analysis.id)).scalar()
-
-    today = db.query(func.count(Analysis.id))\
-        .filter(func.date(Analysis.created_at) == today_str)\
-        .scalar()
-
-    ripeness_counts = db.query(Analysis.ripeness, func.count())\
-        .group_by(Analysis.ripeness)\
-        .all()
-    
+    today = db.query(func.count(Analysis.id)).filter(func.date(Analysis.created_at) == today_str).scalar()
+    ripeness_counts = db.query(Analysis.ripeness, func.count()).group_by(Analysis.ripeness).all()
     db.close()
+    return {"total": total, "today": today, "ripeness_counts": {r: c for r, c in ripeness_counts}}
 
-    return {
-        "total": total,
-        "today": today,
-        "ripeness_counts": {r: c for r, c in ripeness_counts}
-    }
-
-app.include_router(router) 
+# --- 최종 라우터 등록 ---
+app.include_router(auth_router) # @app.post('/login') 등을 여기에 포함시키려면 auth_router로 변경해야 함
+app.include_router(analysis_router)
+app.include_router(task_router)
+app.include_router(stats_router)
 
 # --- ✅ 루트 확인용 ---
 @app.get("/")

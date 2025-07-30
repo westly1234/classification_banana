@@ -1,182 +1,149 @@
-
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useDropzone } from 'react-dropzone';
 import type { YoloAnalysisResult } from '../types';
-import { analyzeBananaWithYolo } from '../services/yoloService';
+import ReactPlayer from 'react-player';
 
-// 분석 중 표시될 로딩 메시지 목록
-const loadingSteps = [
-    "분석 초기화 중...",
-    "이미지 전처리 중...",
-    "YOLO 모델 탐지 실행 중...",
-    "분류 대기 중...",
-    "결과 최종 확인 중..."
-];
+// ✅ [수정] AnalysisState의 result 타입을 배열로 변경
+interface AnalysisState {
+    id: string;
+    file: File;
+    previewUrl: string;
+    result: YoloAnalysisResult[] | null; // 단일 객체가 아닌 배열
+    error: string | null;
+    isLoading: boolean;
+    isSelected: boolean;
+}
 
-// File 객체를 Base64 문자열로 변환하는 헬퍼 함수
+const API_BASE = "http://localhost:8000";
+// api.ts를 사용한다고 가정, 없다면 이전 답변을 참고하여 생성해주세요.
+import api from './api'; 
+
 const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.readAsDataURL(file);
-        reader.onload = () => resolve((reader.result as string).split(',')[1]); // 'data:...' 부분을 제거
+        reader.onload = () => resolve((reader.result as string).split(',')[1]);
         reader.onerror = error => reject(error);
     });
 };
 
 export default function Analyze() {
-    const [file, setFile] = useState<File | null>(null);
-    const [preview, setPreview] = useState<string | null>(null);
-    const [isLoading, setIsLoading] = useState(false);
-    const [loadingText, setLoadingText] = useState(loadingSteps[0]);
-    const [result, setResult] = useState<YoloAnalysisResult | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    const [analysisStates, setAnalysisStates] = useState<AnalysisState[]>([]);
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const navigate = useNavigate();
+    const [videoUrl, setVideoUrl] = useState<string | null>(null);
+    const [taskStatus, setTaskStatus] = useState<string | null>(null);
 
-    // Dropzone: 파일이 드롭되었을 때 호출되는 콜백 함수
+    useEffect(() => {
+        return () => {
+            analysisStates.forEach(state => URL.revokeObjectURL(state.previewUrl));
+        };
+    }, [analysisStates]);
+
     const onDrop = useCallback((acceptedFiles: File[]) => {
-        if (acceptedFiles && acceptedFiles.length > 0) {
-            const selectedFile = acceptedFiles[0];
-            setFile(selectedFile);
-            setPreview(URL.createObjectURL(selectedFile));
-            setResult(null); // 이전 결과 초기화
-            setError(null);  // 이전 에러 초기화
-        }
+        const newStates: AnalysisState[] = acceptedFiles.map(file => ({
+            id: `${file.name}-${file.lastModified}-${Math.random()}`,
+            file,
+            previewUrl: URL.createObjectURL(file),
+            result: null, error: null, isLoading: false, isSelected: false,
+        }));
+        setVideoUrl(null);
+        setTaskStatus(null);
+        setAnalysisStates(prev => [...prev, ...newStates]);
     }, []);
 
-    const { getRootProps, getInputProps, isDragActive } = useDropzone({
-        onDrop,
-        accept: { 'image/*': ['.jpeg', '.png', '.jpg', '.webp'] },
-        multiple: false
-    });
+    const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop, accept: { 'image/*': ['.jpeg', '.png', '.jpg', '.webp'] }, multiple: true });
 
-    // '분석하기' 버튼 클릭 시 실행되는 함수
     const handleAnalyze = async () => {
-        if (!file) return;
+        const imagesToAnalyze = analysisStates.filter(s => !s.result && !s.error);
+        if (imagesToAnalyze.length === 0) {
+            alert("분석할 새로운 이미지를 업로드해주세요.");
+            return;
+        }
+        setIsAnalyzing(true);
+        if (imagesToAnalyze.length === 1) {
+            await analyzeSingleImage();
+        } else {
+            await analyzeMultipleImagesAsVideo();
+        }
+        setIsAnalyzing(false);
+    };
 
-        setIsLoading(true);
-        setResult(null);
-        setError(null);
+    const analyzeSingleImage = async () => {
+        const targetIndex = analysisStates.findIndex(s => !s.result && !s.error);
+        if (targetIndex === -1) return;
 
-        // 로딩 메시지를 주기적으로 변경
-        let step = 0;
-        const interval = setInterval(() => {
-            step = (step + 1) % loadingSteps.length;
-            setLoadingText(loadingSteps[step]);
-        }, 1500);
-
+        setAnalysisStates(prev => prev.map((s, i) => i === targetIndex ? { ...s, isLoading: true, error: null } : s));
         try {
-            const base64Image = await fileToBase64(file);
-            const analysisResult = await analyzeBananaWithYolo(base64Image);
-            setResult(analysisResult);
+            const base64Image = await fileToBase64(analysisStates[targetIndex].file);
+            const res = await api.post(`/analyze`, { image: base64Image });
+            setAnalysisStates(prev => prev.map((s, i) => i === targetIndex ? { ...s, result: res.data, isLoading: false } : s));
         } catch (err: any) {
-            console.error(err);
-            setError(err.message || '바나나 분석에 실패했습니다. 백엔드 연결을 확인하고 다시 시도해주세요.');
-        } finally {
-            clearInterval(interval);
-            setIsLoading(false);
+            const msg = err.response?.data?.detail || "분석 실패";
+            setAnalysisStates(prev => prev.map((s, i) => i === targetIndex ? { ...s, error: msg, isLoading: false } : s));
         }
     };
     
-    // 분석 결과로부터 바운딩 박스 스타일 계산
-    const boundingBoxStyle = result ? {
-        top: `${result.boundingBox.y * 100}%`,
-        left: `${result.boundingBox.x * 100}%`,
-        width: `${result.boundingBox.width * 100}%`,
-        height: `${result.boundingBox.height * 100}%`,
-    } : {};
+    const analyzeMultipleImagesAsVideo = async () => {
+        setTaskStatus("이미지들을 서버로 전송 중입니다...");
+        try {
+            const imagesToProcess = analysisStates.filter(s => !s.result && !s.error);
+            const imagePromises = imagesToProcess.map(state => fileToBase64(state.file));
+            const base64Images = await Promise.all(imagePromises);
+            const res = await api.post(`/analyze_video`, { images: base64Images });
+            const { task_id } = res.data;
+            setTaskStatus("동영상 생성 및 분석 중... (최대 몇 분 소요될 수 있습니다.)");
+            const intervalId = setInterval(async () => {
+                try {
+                    const statusRes = await api.get(`/tasks/${task_id}/status`);
+                    const { status, result } = statusRes.data;
+                    if (status === 'SUCCESS' || status === 'FAILURE') {
+                        clearInterval(intervalId);
+                        if (status === 'SUCCESS') {
+                            setVideoUrl(`${API_BASE}${result}`);
+                            setTaskStatus("동영상 생성 및 분석 완료!");
+                        } else { setTaskStatus(`오류 발생: ${result}`); }
+                    }
+                } catch { clearInterval(intervalId); setTaskStatus("상태 확인 중 오류 발생"); }
+            }, 5000);
+        } catch (err: any) { setTaskStatus(err.response?.data?.detail || "동영상 분석 요청 실패"); }
+    };
+
+    const handleToggleSelect = (id: string) => setAnalysisStates(prev => prev.map(s => (s.id === id ? { ...s, isSelected: !s.isSelected } : s)));
+    const handleDeleteSelected = () => setAnalysisStates(prev => prev.filter(s => !s.isSelected));
+    const handleClearAll = () => setAnalysisStates([]);
+    const hasSelectedItems = analysisStates.some(state => state.isSelected);
 
     return (
-        <div className="max-w-6xl mx-auto">
-            <div className="text-center mb-10">
-                <h1 className="text-4xl font-extrabold text-brand-gray-900">바나나 상태 분류기</h1>
-                <p className="mt-2 text-lg text-brand-gray-600">바나나 사진을 업로드하여 즉시 YOLO 모델 분석 결과를 받아보세요!</p>
+        <div className="max-w-7xl mx-auto p-4 md:p-8">
+            <div className="text-center mb-10"><h1 className="text-4xl font-extrabold text-brand-gray-900">바나나 상태 분류기</h1><p className="mt-2 text-lg text-brand-gray-600">한 장의 사진은 개별 분석, 여러 장은 동영상으로 분석됩니다.</p></div>
+            <div {...getRootProps()} className={`bg-white p-6 md:p-8 rounded-2xl shadow-lg border-4 border-dashed cursor-pointer transition-colors duration-300 mb-8 ${isDragActive ? 'border-yellow-400 bg-yellow-50' : 'border-gray-300 hover:border-yellow-400'}`}>
+                <input {...getInputProps()} /><div className="flex flex-col items-center justify-center text-center"><svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg><p className="mt-4 text-lg text-gray-600">이미지들을 드래그 앤 드롭하거나 클릭해서 선택하세요</p><p className="text-sm text-gray-400 mt-1">PNG, JPG, WEBP 최대 10MB</p></div>
             </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
-                {/* 왼쪽: 업로드 및 미리보기 */}
-                <div className="bg-white p-8 rounded-2xl shadow-lg">
-                    <div
-                        {...getRootProps()}
-                        className={`border-4 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors duration-300 ${isDragActive ? 'border-banana-yellow bg-yellow-50' : 'border-brand-gray-300 hover:border-banana-yellow'}`}
-                    >
-                        <input {...getInputProps()} />
-                        <div className="flex flex-col items-center">
-                            <svg className="w-16 h-16 text-brand-gray-400 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V9.75m0 0l-3.75 3.75M12 9.75l3.75 3.75M3 17.25V6.75A2.25 2.25 0 015.25 4.5h13.5A2.25 2.25 0 0121 6.75v10.5A2.25 2.25 0 0118.75 19.5H5.25A2.25 2.25 0 013 17.25z" />
-                            </svg>
-                            {isDragActive ?
-                                <p className="text-lg font-semibold text-banana-yellow">여기에 바나나를 놓으세요!</p> :
-                                <p className="text-lg text-brand-gray-600">이미지를 드래그 앤 드롭하거나 클릭해서 선택하세요</p>
-                            }
-                            <p className="text-sm text-brand-gray-400 mt-1">PNG, JPG, WEBP 최대 10MB</p>
-                        </div>
+            {analysisStates.length > 0 && (<div><div className="flex justify-between items-center mb-6"><h2 className="text-2xl font-bold">분석 대상 ({analysisStates.length}개)</h2><div className="flex gap-4"><button onClick={handleDeleteSelected} disabled={isAnalyzing || !hasSelectedItems} className="px-6 py-2 bg-gray-300 text-gray-800 font-semibold rounded-lg hover:bg-gray-400 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed">선택 삭제</button><button onClick={handleClearAll} disabled={isAnalyzing} className="px-6 py-2 bg-red-500 text-white font-semibold rounded-lg hover:bg-red-600 disabled:bg-gray-400">전체 삭제</button><button onClick={handleAnalyze} disabled={isAnalyzing} className="px-6 py-2 bg-yellow-400 text-gray-900 font-bold rounded-lg hover:bg-yellow-500 disabled:bg-gray-400">{isAnalyzing ? '분석 중...' : '분석하기'}</button></div></div>
+            {videoUrl ? (<div className="mt-6 bg-white p-4 rounded-lg shadow-lg"><h3 className="text-center mb-4 text-xl font-semibold text-blue-800">{taskStatus}</h3><ReactPlayer key={videoUrl} url={videoUrl} controls={true} playing={true} width="100%" height="auto" /></div>) : (<div>{taskStatus && <div className="text-center my-4 p-4 bg-blue-100 text-blue-800 rounded-lg font-semibold">{taskStatus}</div>}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                {analysisStates.map((state) => (
+                    <div key={state.id} onClick={() => !isAnalyzing && handleToggleSelect(state.id)} className={`relative rounded-lg overflow-hidden cursor-pointer transition-all w-full shadow-md ${state.isSelected ? 'ring-4 ring-blue-500 ring-offset-2' : ''}`} style={{ aspectRatio: '1 / 1' }}>
+                        <img src={state.previewUrl} alt={`분석 이미지`} className="w-full h-full object-cover" />
+                        {state.isLoading && <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div></div>}
+                        {state.error && <div className="absolute inset-0 flex items-center justify-center p-2 text-center text-white font-semibold bg-red-800 bg-opacity-80">{state.error}</div>}
+                        
+                        {/* ✅ [핵심 수정] 결과가 배열인지, 빈 배열인지, 요소가 있는지에 따라 분기 처리 */}
+                        {state.result && state.result.length > 0 && state.result.map((res, index) => (
+                            <React.Fragment key={index}>
+                                <div className="absolute border-4 border-yellow-400 rounded-md" style={{ top: `${res.boundingBox.y * 100}%`, left: `${res.boundingBox.x * 100}%`, width: `${res.boundingBox.width * 100}%`, height: `${res.boundingBox.height * 100}%` }}></div>
+                                <div className="absolute bottom-0 right-0 bg-black bg-opacity-60 text-white text-xs p-1.5 rounded-tl-lg">
+                                    <p className="font-bold">{res.ripeness}</p>
+                                    <p>{(res.confidence * 100).toFixed(1)}%</p>
+                                </div>
+                            </React.Fragment>
+                        ))}
+                        {state.result && state.result.length === 0 && <div className="absolute inset-0 flex items-center justify-center p-2 text-center text-white font-semibold bg-gray-600 bg-opacity-80">바나나를 찾지 못했습니다.</div>}
                     </div>
-                    {preview && (
-                        <div className="mt-6">
-                            <h3 className="font-bold text-lg mb-2">이미지 미리보기:</h3>
-                            <div className="relative">
-                                <img src={preview} alt="바나나 미리보기" className="w-full h-auto rounded-lg shadow-md" />
-                                {result && (
-                                     <div 
-                                         className="absolute border-4 border-banana-yellow rounded-md transition-all duration-500 ease-in-out" 
-                                         style={boundingBoxStyle}
-                                     >
-                                        <span className="absolute -top-7 left-0 bg-banana-yellow text-black text-xs font-bold px-2 py-1 rounded">
-                                            {result.ripeness} ({(result.confidence * 100).toFixed(1)}%)
-                                        </span>
-                                     </div>
-                                )}
-                            </div>
-                            <button onClick={handleAnalyze} disabled={isLoading || !file} className="mt-6 w-full bg-brand-green text-white font-bold py-3 px-4 rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 disabled:bg-brand-gray-400 disabled:cursor-not-allowed transition-all duration-300 text-lg flex items-center justify-center">
-                                {isLoading ? (
-                                    <>
-                                        <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                        </svg>
-                                        분석 중...
-                                    </>
-                                ) : '지금 분석하기'}
-                            </button>
-                        </div>
-                    )}
-                </div>
-
-                {/* 오른쪽: 결과 표시 */}
-                <div className="bg-white p-8 rounded-2xl shadow-lg min-h-[300px] flex flex-col justify-center">
-                    {isLoading && (
-                        <div className="text-center">
-                            <div className="w-24 h-24 mx-auto animate-bounce">
-                                <img src="https://em-content.zobj.net/source/apple/354/banana_1f34c.png" alt="로딩 중인 바나나" />
-                            </div>
-                            <p className="mt-4 text-xl font-semibold text-brand-gray-800">{loadingText}</p>
-                        </div>
-                    )}
-                    {error && <p className="text-center text-red-500 font-bold">{error}</p>}
-                    {result && (
-                        <div className="space-y-4 animate-fade-in">
-                             <h2 className="text-3xl font-bold text-brand-gray-900 border-b-4 border-banana-yellow pb-2">분석 완료!</h2>
-                             <div>
-                                 <h3 className="text-sm uppercase font-bold text-brand-gray-500">분류</h3>
-                                 <p className="text-2xl font-semibold text-banana-green">{result.ripeness}</p>
-                             </div>
-                              <div>
-                                 <h3 className="text-sm uppercase font-bold text-brand-gray-500">신뢰도 점수</h3>
-                                 <p className="text-2xl font-semibold text-brand-green">{(result.confidence * 100).toFixed(1)}%</p>
-                             </div>
-                             <div className="bg-green-50 border-l-4 border-brand-green text-green-800 p-4 rounded-r-lg">
-                                 <h3 className="text-sm uppercase font-bold text-green-900">다음 단계</h3>
-                                 <p className="mt-1">왼쪽의 경계 상자는 탐지된 바나나를 보여줍니다. 이제 실제 YOLO 모델을 백엔드에 통합할 수 있습니다.</p>
-                             </div>
-                        </div>
-                    )}
-                    {!isLoading && !result && !error && (
-                        <div className="text-center text-brand-gray-500">
-                             <svg className="w-16 h-16 mx-auto mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" /></svg>
-                             <p className="text-lg">YOLO 분석 결과가 여기에 표시됩니다.</p>
-                        </div>
-                    )}
-                </div>
-            </div>
+                ))}
+            </div></div>)}</div>)}
         </div>
     );
 }

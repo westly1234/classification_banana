@@ -7,17 +7,22 @@ import Dashboard from './components/Dashboard';
 import Analyze from './components/Analyze';
 
 // 보호된 라우트 (ProtectedRoute) 컴포넌트
-const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const { isAuthenticated } = useAuth();
+import { Outlet } from 'react-router-dom'; // Outlet을 import 합니다.
+
+const ProtectedRoute: React.FC = () => { // children prop은 더 이상 필요 없습니다.
+    const { user, loading } = useAuth(); // AuthContext에서 user와 loading 상태를 가져옵니다.
     const location = useLocation();
 
-    if (!isAuthenticated) {
-        // 로그인되어 있지 않으면 로그인 페이지로 리디렉션
-        // 사용자가 원래 가려던 페이지 정보를 state에 담아 전달
+    // AuthProvider가 로컬 스토리지에서 사용자 정보를 로딩 중일 때를 대비
+    if (loading) {
+        return <div>로딩 중...</div>; // 또는 스피너 컴포넌트
+    }
+
+    if (!user) { // 이제 user 객체 자체로 인증 여부를 판단합니다.
         return <Navigate to="/auth" state={{ from: location }} replace />;
     }
 
-    return <>{children}</>;
+    return <Outlet />; // 인증되었다면, 자식 라우트들을 <Outlet> 위치에 렌더링합니다.
 };
 
 // 메인 레이아웃 컴포넌트
@@ -30,19 +35,24 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => (
     </div>
 );
 
-// 메인 앱 컴포넌트
 export default function App() {
     return (
         <AuthProvider>
             <HashRouter>
                 <Routes>
-                    {/* 인증이 필요 없는 라우트 */}
+                    {/* 1. 인증이 필요 없는 라우트 */}
                     <Route path="/auth" element={<AuthPage />} />
 
-                    {/* 인증이 필요한 라우트들을 ProtectedRoute로 감쌉니다. */}
-                    <Route path="/" element={<ProtectedRoute><Navigate to="/analyze" replace /></ProtectedRoute>} />
-                    <Route path="/analyze" element={<ProtectedRoute><MainLayout><Analyze /></MainLayout></ProtectedRoute>} />
-                    <Route path="/dashboard" element={<ProtectedRoute><MainLayout><Dashboard /></MainLayout></ProtectedRoute>} />
+                    {/* 2. 인증이 필요한 라우트들은 부모 Route 안에 중첩시킵니다. */}
+                    <Route element={<ProtectedRoute />}>
+                        {/* 이 부모 Route가 모든 자식들을 보호합니다. */}
+                        
+                        <Route path="/" element={<Navigate to="/analyze" replace />} />
+                        <Route path="/analyze" element={<MainLayout><Analyze /></MainLayout>} />
+                        <Route path="/dashboard" element={<MainLayout><Dashboard /></MainLayout>} />
+                        
+                        {/* 여기에 다른 보호된 페이지들을 계속 추가할 수 있습니다. */}
+                    </Route>
                     
                     {/* 일치하는 라우트가 없을 경우 기본 페이지로 리디렉션 */}
                     <Route path="*" element={<Navigate to="/" />} />

@@ -26,30 +26,30 @@ export default function AuthPage() {
 
         try {
             if (isLoginView) {
-                // ❌ 기존 FormData 방식
-                // const formData = new FormData();
-                // formData.append("username", email);
-                // formData.append("password", password);
-
-                // ✅ URLSearchParams 방식으로 수정
                 const params = new URLSearchParams();
                 params.append('username', email);
                 params.append('password', password);
 
-                const res = await axios.post(`${API_BASE}/login`, params, {
-                    // headers는 명시하지 않아도 axios가 자동으로 'application/x-www-form-urlencoded'로 설정합니다.
-                });
+                const res = await axios.post(`${API_BASE}/login`, params);
 
-                // login 함수 호출 시 res.data.nickname이 없을 경우를 대비하여 토큰에서 직접 파싱하는 것이 더 안정적입니다.
-                // (백엔드에서 닉네임을 응답에 포함시켜주지 않았기 때문)
                 const token = res.data.access_token;
-                // 간단한 디코딩으로 payload를 가져올 수 있습니다 (라이브러리 사용 권장).
-                const decodedToken = JSON.parse(atob(token.split('.')[1]));
+                localStorage.setItem("access_token", token); // 토큰 저장을 먼저 실행
 
-                login({ name: decodedToken.nickname || email.split("@")[0], email });
-                localStorage.setItem("access_token", token);
+                let decodedNickname = null;
+                try {
+                    // 에러 발생 가능성이 높은 코드를 별도의 try-catch로 감쌉니다.
+                    const decodedPayload = JSON.parse(atob(token.split('.')[1]));
+                    decodedNickname = decodedPayload.nickname;
+                } catch (e) {
+                    console.error("JWT 토큰 디코딩 중 에러 발생:", e);
+                    // 여기서 에러가 나도 전체 로직이 멈추지 않고 계속 진행됩니다.
+                }
+
+                // login 컨텍스트 함수 호출
+                login({ name: decodedNickname || email.split("@")[0], email });
+
+                // 페이지 이동 함수 호출 (이제는 이 코드가 반드시 실행됩니다)
                 navigate(from, { replace: true });
-
             } else {
                 // 회원가입 로직은 JSON 형식이므로 그대로 둡니다.
                 // (main.py의 signup 함수가 Pydantic 모델 UserCreate를 사용하므로 JSON을 잘 처리합니다.)

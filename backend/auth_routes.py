@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker, Session
 import datetime
 
 # 🔐 설정
-SECRET_KEY = "banana-secret-key"
+SECRET_KEY = "482a2ca94b3c91eeb219221cb86decb51d1969a9fe3accb8e547909907ccd932"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 

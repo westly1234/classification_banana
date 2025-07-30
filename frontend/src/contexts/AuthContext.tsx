@@ -1,39 +1,60 @@
-import React, { useState, createContext, useContext, useMemo } from 'react';
-import type { AuthContextType, User } from '../types';
+// AuthContext.tsx 전체 코드
 
-// 1. 인증 컨텍스트 생성
+import React, { createContext, useContext, useState, useEffect } from "react";
+
+interface AuthContextType {
+  user: { name: string; email: string } | null;
+  loading: boolean; // 로딩 상태 추가
+  login: (userData: { name: string; email: string }) => void;
+  logout: () => void;
+}
+
 const AuthContext = createContext<AuthContextType | null>(null);
 
-// 2. 인증 훅 (useAuth) 생성
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<{ name: string; email: string } | null>(null);
+  const [loading, setLoading] = useState(true); // 초기 상태는 로딩 중
+
+  useEffect(() => {
+    try {
+        const savedUser = localStorage.getItem("user");
+        const token = localStorage.getItem("access_token");
+
+        if (savedUser && token) {
+            setUser(JSON.parse(savedUser));
+        }
+    } catch (error) {
+        console.error("사용자 정보 복원 실패", error);
+        setUser(null); // 에러 발생 시 확실하게 로그아웃 처리
+    } finally {
+        setLoading(false); // 정보 복원 시도 후 로딩 상태 해제
+    }
+  }, []);
+
+  const login = (userData: { name: string; email: string }) => {
+    setUser(userData);
+    localStorage.setItem("user", JSON.stringify(userData));
+  };
+
+  const logout = () => {
+    setUser(null);
+    localStorage.removeItem("user");
+    localStorage.removeItem("access_token");
+  };
+
+  const value = { user, loading, login, logout };
+
+  return (
+    <AuthContext.Provider value={value}>
+      {!loading && children} {/* 로딩이 끝나면 자식 컴포넌트를 렌더링 */}
+    </AuthContext.Provider>
+  );
+};
+
 export const useAuth = () => {
     const context = useContext(AuthContext);
     if (!context) {
-        throw new Error('useAuth는 AuthProvider 내에서 사용해야 합니다.');
+        throw new Error("useAuth must be used within an AuthProvider");
     }
     return context;
-};
-
-// 3. 인증 제공자 (AuthProvider) 컴포넌트
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const [user, setUser] = useState<User | null>(null);
-
-    const login = (userData: User) => {
-        setUser(userData);
-        // 실제 앱에서는 여기에 localStorage에 토큰을 저장하는 로직을 추가합니다.
-    };
-
-    const logout = () => {
-        setUser(null);
-        // 실제 앱에서는 여기에서 localStorage의 토큰을 제거합니다.
-    };
-    
-    // user 상태가 변경될 때만 value 객체를 재생성하여 불필요한 리렌더링 방지
-    const value = useMemo(() => ({
-        user,
-        isAuthenticated: !!user,
-        login,
-        logout,
-    }), [user]);
-
-    return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
