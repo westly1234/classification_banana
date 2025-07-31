@@ -56,3 +56,18 @@ classification_banana/
 ├── dataset.py            # 커스텀 Dataset 및 전처리
 ├── utils.py              # 보조 함수 (Letterbox 등)
 └── requirements.txt      # 의존성 목록
+```
+##  FastAPI 백엔드
+
+본 프로젝트는 바나나 품질 분류 모델을 **FastAPI**로 감싸 RESTful API 형태로 배포할 수 있도록 구성되어 있습니다.
+
+### 주요 기능
+- `/predict` 엔드포인트에서 이미지 업로드 및 분류 결과 반환
+- CORS 설정을 통한 React 프론트엔드와 통신 지원
+- JSON 응답 형식 제공 (분류 결과, 신뢰도 등)
+
+### 실행 방법
+
+```bash
+uvicorn main:app --reload
+```
