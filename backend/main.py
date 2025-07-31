@@ -406,15 +406,6 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 # --- 📹 비동기 작업 및 동영상 생성 ---
 
-COLOR_MAP = {
-    "신선한 완숙": (0, 255, 0),      # 초록
-    "신선한 미숙": (0, 200, 255),    # 청록
-    "과숙": (255, 165, 0),           # 주황
-    "완숙": (0, 255, 255),           # 노랑
-    "썩음": (255, 0, 0),             # 빨강
-    "미숙": (0, 0, 255)              # 파랑
-}
-
 def letterbox_image(img, target_width, target_height):
     h, w = img.shape[:2]
     scale = min(target_width / w, target_height / h)
@@ -588,15 +579,24 @@ task_router = APIRouter(tags=["Tasks"])
 stats_router = APIRouter(tags=["Statistics"])
 
 # --- 분석 라우터 (모든 API에 인증 필요) ---
-@analysis_router.post("/analyze", response_model=list[YoloAnalysisResult])
+@analysis_router.post("/analyze")
 def analyze_single_image(payload: ImagePayload, current_user: User = Depends(get_current_user)):
     if not model:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="모델이 현재 사용할 수 없습니다.")
     try:
         image_data = base64.b64decode(payload.image)
         image = Image.open(io.BytesIO(image_data)).convert("RGB")
-        result = run_yolo_model(image) # 기존에 만들어둔 분석 함수 호출
-        return result
+        detections = run_yolo_model(image)  # 기존 YOLO 결과
+
+        # ✅ 평균 신뢰도 계산
+        avg_conf = 0
+        if len(detections) > 0:
+            avg_conf = sum([d["confidence"] for d in detections]) / len(detections)
+
+        return {
+            "detections": detections,
+            "avg_confidence": round(avg_conf, 4)  # 백엔드에서 미리 계산
+        }
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -607,69 +607,62 @@ async def start_video_analysis(
     files: List[UploadFile] = File(...),
     current_user: User = Depends(get_current_user)
 ):
-    if len(files) < 2:
+    if len(files) < 1: # [수정] 1장 이상이면 비디오 분석 가능하도록 변경
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="동영상 분석을 위해서는 2장 이상의 이미지가 필요합니다."
+            detail="동영상 분석을 위해서는 1장 이상의 이미지가 필요합니다."
         )
 
     task_id = str(uuid.uuid4())
     tasks[task_id] = {"status": "PENDING", "result": None}
 
-    images = []
-    image_results = []
-    db = SessionLocal()
-    try:
-        for file in files:
-            content = await file.read()
-            if not content:
-                print(f"⚠️ {file.filename} is empty")
-                continue
+    images_for_video = []  # [핵심 수정] 동영상 생성에 사용할 이미지 데이터 리스트
+    image_results = []     # [핵심 수정] 프론트로 즉시 반환할 분석 결과 리스트
 
-            # ✅ 동영상 생성용 저장
-            images.append(content)
+    for file in files:
+        content = await file.read()
+        if not content:
+            continue
+        
+        # [핵심 수정] 동영상 생성을 위해 파일 내용을 리스트에 추가합니다.
+        images_for_video.append(content)
 
-            # ✅ YOLO 분석
+        # --- 각 이미지에 대한 개별 분석을 즉시 수행 ---
+        try:
             pil_image = Image.open(io.BytesIO(content)).convert("RGB")
-            cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-            results = model(cv_image, verbose=False)
-
-            detections = []
-            for box in results[0].boxes:
-                x1, y1, x2, y2 = [float(i) for i in box.xyxy[0]]
-                conf = float(box.conf[0])
-                cls_id = int(box.cls[0])
-                cls_name = KOREAN_CLASSES.get(model.names[cls_id], model.names[cls_id])
-
-                # ✅ DB 저장
-                db.add(Analysis(
-                    username=current_user.nickname,
-                    ripeness=cls_name,
-                    confidence=conf,
-                    image_path=file.filename,
-                    video_path=f"/results/{task_id}_final.mp4"
-                ))
             
-                detections.append({
-                    "label": cls_name,
-                    "confidence": conf,
-                    "boundingBox": {
-                        "x": x1 / cv_image.shape[1],
-                        "y": y1 / cv_image.shape[0],
-                        "width": (x2 - x1) / cv_image.shape[1],
-                        "height": (y2 - y1) / cv_image.shape[0]
-                    }
-                })
+            # run_yolo_model 함수를 재사용하여 분석 로직을 통일합니다.
+            detections = run_yolo_model(pil_image)
 
-            image_results.append({"filename": file.filename, "detections": detections})
-        db.commit()
-    finally:
-        db.close()
+            # 프론트엔드에서 사용할 평균 신뢰도를 계산합니다.
+            avg_conf = sum(d["confidence"] for d in detections) / len(detections) if detections else 0
 
-    # ✅ 백그라운드 스레드 실행
-    thread = threading.Thread(target=create_analysis_video, args=(task_id, images))
-    thread.start()
+            # 프론트엔드로 보낼 결과 데이터 구조를 만듭니다.
+            image_results.append({
+                "filename": file.filename,
+                "detections": detections, # run_yolo_model의 결과를 그대로 사용
+                "avg_confidence": avg_conf
+            })
+        except Exception as e:
+            # 특정 이미지 분석에 실패하더라도 계속 진행합니다.
+            print(f"파일 분석 실패: {file.filename}, 오류: {e}")
+            image_results.append({
+                "filename": file.filename,
+                "detections": [],
+                "avg_confidence": 0,
+                "error": str(e) # 에러 정보 추가
+            })
 
+    # [핵심 수정] 내용이 채워진 images_for_video 리스트를 백그라운드 스레드에 전달합니다.
+    if images_for_video:
+        thread = threading.Thread(target=create_analysis_video, args=(task_id, images_for_video))
+        thread.start()
+    else:
+        # 유효한 이미지가 하나도 없는 경우 즉시 실패 처리
+        tasks[task_id] = {"status": "FAILURE", "result": "유효한 이미지가 없습니다."}
+
+
+    # [핵심 수정] 동영상 생성 시작과 동시에, 각 이미지의 분석 결과를 즉시 프론트로 반환합니다.
     return {"task_id": task_id, "results": image_results}
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
@@ -744,6 +737,16 @@ def get_summary_stats():
             func.date(Analysis.created_at) == yesterday_date
         ).scalar() or 0
 
+        label_score = {"미숙": 20, "신선한 미숙": 40, "완숙": 60, "신선한 완숙": 80, "과숙": 60, "썩음": 20}
+        
+        # 오늘 신선도 평균 (%)
+        all_records_today = db.query(Analysis.ripeness).filter(func.date(Analysis.created_at) == today_date).all()
+        avg_freshness_today = (sum(label_score.get(r[0], 0) for r in all_records_today) / len(all_records_today)) if all_records_today else 0
+
+        # 어제 신선도 평균 (%)
+        all_records_yesterday = db.query(Analysis.ripeness).filter(func.date(Analysis.created_at) == yesterday_date).all()
+        avg_freshness_yesterday = (sum(label_score.get(r[0], 0) for r in all_records_yesterday) / len(all_records_yesterday)) if all_records_yesterday else 0
+
         return {
             "today": today_count,
             "yesterday": yesterday_count,
@@ -752,7 +755,9 @@ def get_summary_stats():
             "ripeness_counts": ripeness_counts,
             "ripeness_types_yesterday": ripeness_types_yesterday,
             "avg_confidence_today": round(avg_confidence_today * 100, 2),
-            "avg_confidence_yesterday": round(avg_confidence_yesterday * 100, 2)
+            "avg_confidence_yesterday": round(avg_confidence_yesterday * 100, 2),
+            "avg_freshness_today": round(avg_freshness_today, 2),
+            "avg_freshness_yesterday": round(avg_freshness_yesterday, 2)
         }
     finally:
         db.close()

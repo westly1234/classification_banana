@@ -4,7 +4,7 @@ import api from './api';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
-import { ChartBarIcon, MagnifyingGlassIcon, SparklesIcon, CheckCircleIcon } from '@heroicons/react/24/outline';
+import { ChartBarIcon, MagnifyingGlassIcon, SparklesIcon, CheckCircleIcon, BeakerIcon } from '@heroicons/react/24/outline';
 
 //백엔드 API 응답의 모양을 정의하는 인터페이스
 interface SummaryData {
@@ -16,6 +16,8 @@ interface SummaryData {
   ripeness_types_yesterday: number;
   avg_confidence_today: number;
   avg_confidence_yesterday: number;
+  avg_freshness_today: number;
+  avg_freshness_yesterday: number;
 }
 
 // StatCard 컴포넌트의 props 타입을 정의
@@ -99,6 +101,11 @@ const Dashboard = () => {
       summary.avg_confidence_yesterday,
       '%'
   );
+  const freshnessChange = calculateChange(
+      summary.avg_freshness_today,
+      summary.avg_freshness_yesterday,
+      '%'
+  );
 
   return (
     <div className="space-y-8">
@@ -122,6 +129,12 @@ const Dashboard = () => {
             value={`${summary.avg_confidence_today.toFixed(1)} %`}
             change={accuracyChange}
             icon={<CheckCircleIcon className="h-6 w-6" />}
+          />
+          <StatCard
+              title="오늘 평균 신선도"
+              value={`${summary.avg_freshness_today.toFixed(1)} %`}
+              change={freshnessChange}
+              icon={<BeakerIcon className="h-6 w-6" />}
           />
           <StatCard
             title="숙성 상태 다양성"

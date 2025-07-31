@@ -14,7 +14,7 @@ export interface AuthContextType {
 
 // YOLO 백엔드로부터 받는 분석 결과 타입
 export interface YoloAnalysisResult {
-  label: string;                // YOLO 감지 클래스명 (ex: "완숙", "과숙")
+  ripeness: string;                // YOLO 감지 클래스명 (ex: "완숙", "과숙")
   confidence: number;           // 신뢰도 (0~1)
   boundingBox: {
       x: number;      // 상대 좌표 (0-1)
@@ -30,4 +30,10 @@ export interface AnalysisHistory {
     date: string;
     imageUrl: string;
     details: YoloAnalysisResult;
+}
+
+export interface ImageAnalysisResultPayload {
+    filename: string;
+    detections: YoloAnalysisResult[];
+    avg_confidence: number;
 }

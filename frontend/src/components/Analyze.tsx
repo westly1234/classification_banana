@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDropzone } from 'react-dropzone';
-import type { YoloAnalysisResult } from '../types';
+import type { YoloAnalysisResult, ImageAnalysisResultPayload } from '../types';
 import api from './api';
 
 interface AnalysisState {
@@ -12,6 +12,7 @@ interface AnalysisState {
     error: string | null;
     isLoading: boolean;
     isSelected: boolean;
+    avg_confidence?: number; 
 }
 
 type StorableAnalysisState = Omit<AnalysisState, 'file'> & { fileName: string, fileType: string };
@@ -87,136 +88,191 @@ export default function Analyze() {
     };
 
     const onDrop = useCallback(async (acceptedFiles: File[]) => {
+        const validFiles = acceptedFiles.filter(file => file.size > 0 && file.type.startsWith("image/"));
+        if (validFiles.length === 0) {
+            alert("유효한 이미지 파일이 없습니다.");
+            return;
+        }
+
         const newStates: AnalysisState[] = await Promise.all(
-            acceptedFiles.map(async file => ({
+            validFiles.map(async file => ({
                 id: `${file.name}-${file.lastModified}-${Math.random()}`,
                 file,
                 previewUrl: await fileToBase64Url(file),
-                result: null, error: null, isLoading: false, isSelected: false,
+                result: null,
+                error: null,
+                isLoading: false,
+                isSelected: false,
+                avg_confidence: undefined,  // ✅ 평균값 초기화
             }))
         );
+
         setVideoUrl(null);
         setTaskStatus(null);
-        localStorage.removeItem('lastVideoUrl');
+        localStorage.removeItem("lastVideoUrl");
         setAnalysisStates(newStates);
     }, []);
 
     const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop, accept: { 'image/*': ['.jpeg', '.png', '.jpg', '.webp'] }, multiple: true });
 
     const handleAnalyze = async () => {
-        const imagesToAnalyze = analysisStates.filter(s => !s.result && !s.error);
-        if (imagesToAnalyze.length === 0) {
-            alert("분석할 새로운 이미지를 업로드해주세요.");
+        // [수정] 파일 크기가 0보다 큰, '진짜' 파일만 분석 대상으로 필터링합니다.
+        const statesToAnalyze = analysisStates.filter(
+            s => s.file && s.file.size > 0 && !s.result && !s.error
+        );
+
+        if (statesToAnalyze.length === 0) {
+            alert("분석할 새로운 이미지가 없습니다. 페이지를 새로고침 하셨다면, 이미지를 다시 업로드해주세요.");
             return;
         }
 
         setIsAnalyzing(true);
-        // ✅ [핵심 수정] try...finally 블록으로 전체 분석 과정을 감쌉니다.
         try {
-            if (imagesToAnalyze.length === 1) {
-                await analyzeSingleImage();
+            // [수정] 분석할 이미지 개수에 따라 다른 함수를 호출하고, '진짜' 파일 목록을 넘겨줍니다.
+            if (statesToAnalyze.length === 1) {
+                await analyzeSingleImage(statesToAnalyze[0]);
             } else {
-                await analyzeMultipleImagesAsVideo();
+                await analyzeMultipleImagesAsVideo(statesToAnalyze);
             }
         } catch (error) {
-            // analyzeMultipleImagesAsVideo에서 reject된 에러를 처리
             console.error("분석 프로세스 중 처리되지 않은 에러 발생:", error);
-            // 대부분의 에러 메시지는 taskStatus에 이미 표시되므로 추가 alert는 생략합니다.
         } finally {
-            // ✅ 성공하든, 실패하든, 모든 과정이 끝나면 반드시 실행됩니다.
             setIsAnalyzing(false);
         }
     };
 
-    const analyzeSingleImage = async () => {
-        const targetIndex = analysisStates.findIndex(s => !s.result && !s.error);
-        if (targetIndex === -1) {
-            // 분석할 이미지가 없는 경우 즉시 종료
-            return;
-        }
+    const analyzeSingleImage = async (targetState: AnalysisState) => {
+        const targetId = targetState.id;
 
-        // 개별 이미지의 로딩 상태를 true로 설정
-        setAnalysisStates(prev => prev.map((s, i) => 
-            i === targetIndex ? { ...s, isLoading: true, error: null } : s
+        // 1. 분석 시작을 알리는 로딩 상태로 변경
+        setAnalysisStates(prev => prev.map(s =>
+            s.id === targetId ? { ...s, isLoading: true, error: null } : s
         ));
-        
+
         try {
-            const base64Image = await fileToBase64(analysisStates[targetIndex].file);
-            const res = await api.post(`/analyze`, { image: base64Image });
-            
-            // 성공 시 결과 업데이트 및 로딩 상태 false로 변경
-            setAnalysisStates(prev => prev.map((s, i) => 
-                i === targetIndex ? { ...s, result: res.data, isLoading: false } : s
+            const base64Image = await fileToBase64(targetState.file);
+
+            // [핵심 수정] 백엔드가 보내주는 { detections: [...], ... } 객체 타입을 명시합니다.
+            const res = await api.post<ImageAnalysisResultPayload>(`/analyze`, { image: base64Image });
+
+            // [핵심 수정] 이제 res.data는 배열이 아닌 객체이므로, 바로 구조를 분해해서 사용합니다.
+            const { detections, avg_confidence } = res.data;
+
+            // [핵심 수정] 백엔드의 'ripeness'를 프론트엔드의 'label'로 매핑해줍니다.
+            const formattedDetections = detections.map(d => ({
+                ...d,
+                label: d.ripeness // 데이터 이름 통일
+            }));
+
+            // 3. 분석 결과를 상태에 업데이트
+            setAnalysisStates(prev => prev.map(s =>
+                s.id === targetId
+                    ? {
+                        ...s,
+                        result: formattedDetections,
+                        avg_confidence: avg_confidence ?? 0, // 백엔드에서 받은 평균값 사용
+                        isLoading: false
+                    }
+                    : s
             ));
+
         } catch (err: any) {
             const msg = err.response?.data?.detail || "분석 실패";
-            
-            // 실패 시 에러 메시지 업데이트 및 로딩 상태 false로 변경
-            setAnalysisStates(prev => prev.map((s, i) => 
-                i === targetIndex ? { ...s, error: msg, isLoading: false } : s
+            setAnalysisStates(prev => prev.map(s =>
+                s.id === targetId ? { ...s, error: msg, isLoading: false } : s
             ));
         }
     };
-    
-    const analyzeMultipleImagesAsVideo = (): Promise<void> => {
+
+    const analyzeMultipleImagesAsVideo = (statesToAnalyze: AnalysisState[]): Promise<void> => {
         return new Promise(async (resolve, reject) => {
-            setTaskStatus("이미지들을 서버로 전송 중입니다...");
+            setTaskStatus("이미지 분석 및 동영상 생성 요청 중...");
+
+            // 분석을 시작할 이미지들의 ID를 저장해둡니다.
+            const idsToAnalyze = new Set(statesToAnalyze.map(s => s.id));
+
+            // 해당 이미지들의 로딩 상태를 true로 변경합니다.
+            setAnalysisStates(prev => prev.map(s =>
+                idsToAnalyze.has(s.id) ? { ...s, isLoading: true, error: null } : s
+            ));
+
             try {
                 const formData = new FormData();
-                analysisStates.forEach((state) => {
-                    console.log("전송 파일:", state.file.name, state.file.size);
-                    formData.append("files", state.file);  // 실제 파일 자체를 전송
+                statesToAnalyze.forEach((state) => {
+                    formData.append("files", state.file);
                 });
 
-                const res = await api.post(`/analyze_video`, formData, {
-                    headers: { "Content-Type": "multipart/form-data" },
-                    maxContentLength: Infinity,
-                    maxBodyLength: Infinity
-                });
+                // [핵심 로직 1] 백엔드에 이미지들을 전송하고, 즉시 개별 분석 결과를 받습니다.
+                const res = await api.post<{ task_id: string; results: ImageAnalysisResultPayload[] }>(
+                    `/analyze_video`,
+                    formData,
+                    {
+                        headers: { "Content-Type": "multipart/form-data" },
+                        maxContentLength: Infinity,
+                        maxBodyLength: Infinity,
+                    }
+                );
 
                 const { task_id, results } = res.data;
-                if (results && results.length > 0){
-                    setAnalysisStates(prev =>
-                        prev.map(state => {
-                            const match = results.find((r: { filename: string; detections: YoloAnalysisResult[] }) => r.filename === state.file.name);
-                            return match ? { ...state, result: match.detections } : state;
-                        })
-                    );
-                }
-                setTaskStatus("동영상 생성 및 분석 중... (최대 몇 분 소요될 수 있습니다)");
+
+                // [핵심 로직 2] 백엔드에서 받은 개별 분석 결과를 즉시 화면에 업데이트합니다.
+                const resultsMap = new Map(results.map(r => [r.filename, r]));
+                setAnalysisStates(prev => prev.map(state => {
+                    const match = resultsMap.get(state.file.name);
+                    if (match) {
+                        // YoloAnalysisResult 타입과 맞추기 위해 'ripeness'를 'label'로 변경
+                        const formattedDetections = match.detections.map(d => ({
+                            ...d,
+                            label: d.ripeness 
+                        }));
+
+                        return {
+                            ...state,
+                            result: formattedDetections,
+                            avg_confidence: match.avg_confidence ?? 0,
+                            isLoading: false, // 개별 분석 끝났으므로 로딩 해제
+                            error: null,
+                        };
+                    }
+                    return state;
+                }));
+
+                // [핵심 로직 3] 이제부터는 '동영상 생성' 상태만 주기적으로 확인합니다.
+                setTaskStatus("동영상 생성 중... (최대 몇 분 소요될 수 있습니다)");
 
                 const intervalId = setInterval(async () => {
                     try {
                         const statusRes = await api.get(`/tasks/${task_id}/status`);
-                        const { status, result, image_results } = statusRes.data;
+                        const { status, result } = statusRes.data;
 
                         if (status === 'SUCCESS' || status === 'FAILURE') {
                             clearInterval(intervalId);
                             if (status === 'SUCCESS') {
-                                clearInterval(intervalId);
                                 const finalUrl = `${API_BASE}${result}`;
                                 setVideoUrl(finalUrl);
                                 sessionStorage.setItem('lastVideoUrl', finalUrl);
-                                if (image_results && image_results.length > 0) {
-                                    setAnalysisStates(prev =>
-                                        prev.map((s, i) => ({ ...s, result: image_results[i]?.detections || [] }))
-                                    );
-                                }
-                                setTaskStatus("동영상 생성 및 분석 완료!");
-                                resolve();
+                                setTaskStatus("동영상 생성 완료!");
+                                resolve(); // 성공
                             } else {
-                                setTaskStatus(`오류 발생: ${result}`);
-                                reject(new Error(result));
+                                // 동영상 생성 실패 시 메시지만 업데이트
+                                setTaskStatus(`오류: 동영상 생성 실패 (${result})`);
+                                reject(new Error(result)); // 실패
                             }
                         }
                     } catch (pollError) {
                         clearInterval(intervalId);
-                        setTaskStatus("상태 확인 중 오류 발생");
+                        setTaskStatus("동영상 상태 확인 중 오류 발생");
                         reject(pollError);
                     }
                 }, 5000);
+
             } catch (requestError: any) {
-                setTaskStatus(requestError.response?.data?.detail || "동영상 분석 요청 실패");
+                const errorMsg = requestError.response?.data?.detail || "분석 요청 실패";
+                setTaskStatus(errorMsg);
+                // 요청 자체에 실패했으므로 모든 로딩 상태를 해제합니다.
+                setAnalysisStates(prev => prev.map(s =>
+                    idsToAnalyze.has(s.id) ? { ...s, isLoading: false, error: errorMsg } : s
+                ));
                 reject(requestError);
             }
         });
@@ -267,14 +323,6 @@ export default function Analyze() {
                         <img src={state.previewUrl} alt={`분석 이미지`} className="w-full h-full object-cover" />
                         {state.isLoading && <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div></div>}
                         {state.error && <div className="absolute inset-0 flex items-center justify-center p-2 text-center text-white font-semibold bg-red-800 bg-opacity-80">{state.error}</div>}
-                        
-                        {state.result && state.result.length > 0 && (
-                            <div className="absolute bottom-0 bg-black bg-opacity-60 text-white text-xs p-1.5 rounded-tl-lg">
-                                {state.result.map((r, i) => (
-                                    <p key={i}>{r.label} ({(r.confidence*100).toFixed(1)}%)</p>
-                                ))}
-                            </div>
-                        )}
 
                         {state.result && state.result.length > 0 && state.result.map((res, index) => (
                             <React.Fragment key={index}>
@@ -297,10 +345,15 @@ export default function Analyze() {
                                         left: `${res.boundingBox.x * 100}%`,
                                     }}
                                 >
-                                    {res.label} ({(res.confidence * 100).toFixed(1)}%)
+                                    {`${res.ripeness} (${(res.confidence * 100).toFixed(1)}%)`}
                                 </div>
                             </React.Fragment>
                         ))}
+                        {state.avg_confidence !== undefined && (
+                            <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-70 text-yellow-300 text-sm font-semibold px-2 py-1 rounded-t">
+                                평균 정확도: {(state.avg_confidence * 100).toFixed(1)}% 
+                            </div>
+                        )}
                         {state.result && state.result.length === 0 && <div className="absolute inset-0 flex items-center justify-center p-2 text-center text-white font-semibold bg-gray-600 bg-opacity-80">바나나를 찾지 못했습니다.</div>}
                     </div>
                 ))}
