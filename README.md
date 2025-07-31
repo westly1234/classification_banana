@@ -11,8 +11,17 @@
 - **기술 스택:** PyTorch, torchvision, PIL, NumPy, ultralytics
 - **모델 구조:** YOLO, CNN 기반 커스텀 모델
 - **분류 클래스:**  
-  - `0`: GOOD (정상 바나나)  
-  - `1`: BAD (썩음, 손상, 오염 등 품질 불량 바나나)
+freshripe (0): 신선하고 잘 익은 바나나
+
+freshunripe (1): 신선하지만 덜 익은 바나나
+
+overripe (2): 너무 익은 바나나
+
+ripe (3): 완전히 익은 바나나
+
+rotten (4): 썩은 바나나
+
+unripe (5): 덜 익은 바나나
 
 ---
 
