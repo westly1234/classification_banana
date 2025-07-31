@@ -11,6 +11,7 @@
 - **기술 스택:** PyTorch, torchvision, PIL, NumPy, ultralytics
 - **모델 구조:** YOLO, CNN 기반 커스텀 모델
 - **분류 클래스:**  
+
 freshripe (0): 신선하고 잘 익은 바나나
 
 freshunripe (1): 신선하지만 덜 익은 바나나
