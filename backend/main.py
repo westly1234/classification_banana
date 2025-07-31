@@ -1,9 +1,10 @@
 # --- 📁 backend/main.py ---
 
-import base64, io, uuid, threading, smtplib, pytz, cv2, time, subprocess, numpy as np
+import base64, os, io, uuid, threading, smtplib, pytz, cv2, time, subprocess, numpy as np
 from datetime import datetime, timedelta
 from pytz import timezone
 from pathlib import Path
+from markupsafe import Markup
 from PIL import Image, ImageFont, ImageDraw
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -22,7 +23,7 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 # SQLAlchemy 관련 import 문 추가
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, func
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, func
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -78,7 +79,9 @@ class Analysis(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, index=True)
     ripeness = Column(String)
-    confidence = Column(String)
+    confidence = Column(Float)
+    image_path = Column(String, nullable=True)
+    video_path = Column(String, nullable=True)
     created_at = Column(DateTime, default=get_kst_now)
 
 Base.metadata.create_all(bind=engine)
@@ -117,9 +120,44 @@ class UserAdmin(ModelView, model=User):
     column_list = [User.id, User.nickname, User.email]
 
 class AnalysisAdmin(ModelView, model=Analysis):
-    name = "Analysis"
-    name_plural = "Analysis" 
-    column_list = [Analysis.id, Analysis.username, Analysis.ripeness, Analysis.created_at]
+    name = "분석 기록"
+    name_plural = "분석 기록"
+    icon = "fa-solid fa-video"
+    column_list = [Analysis.id, Analysis.username, Analysis.ripeness,
+                   Analysis.confidence, Analysis.created_at, "preview"]
+
+    # 🔹 Admin 테이블에 썸네일 / 동영상 미리보기 칼럼
+    async def preview(self, obj):
+        preview_html = ""
+
+        # 이미지 썸네일
+        if obj.image_path:
+            preview_html += f"<img src='/results/{obj.image_path}' width='80' style='margin:3px; border-radius:6px;'>"
+
+        # 동영상 미리보기 버튼
+        if obj.video_path:
+            preview_html += f"""
+                <video width='120' controls style='margin:3px;'>
+                    <source src='{obj.video_path}' type='video/mp4'>
+                    Your browser does not support the video tag.
+                </video>
+            """
+
+        return Markup(preview_html) if preview_html else "-"
+
+    column_formatters = {
+        "preview": preview
+    }
+
+    # ✅ 기본 CRUD 허용 (추가, 수정, 삭제)
+    can_create = True
+    can_edit = True
+    can_delete = True
+
+    # ✅ 새 레코드 추가 시 필드 지정
+    form_columns = [
+        "username", "ripeness", "confidence", "image_path", "video_path", "created_at"
+    ]
 
 class SimpleAuth(AuthenticationBackend):
     async def login(self, request: Request) -> bool:
@@ -580,39 +618,53 @@ async def start_video_analysis(
 
     images = []
     image_results = []
+    db = SessionLocal()
+    try:
+        for file in files:
+            content = await file.read()
+            if not content:
+                print(f"⚠️ {file.filename} is empty")
+                continue
 
-    for file in files:
-        content = await file.read()
-        if not content:
-            print(f"⚠️ {file.filename} is empty")
-            continue
+            # ✅ 동영상 생성용 저장
+            images.append(content)
 
-        # ✅ 동영상 생성용 저장
-        images.append(content)
+            # ✅ YOLO 분석
+            pil_image = Image.open(io.BytesIO(content)).convert("RGB")
+            cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            results = model(cv_image, verbose=False)
 
-        # ✅ YOLO 분석
-        pil_image = Image.open(io.BytesIO(content)).convert("RGB")
-        cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-        results = model(cv_image, verbose=False)
+            detections = []
+            for box in results[0].boxes:
+                x1, y1, x2, y2 = [float(i) for i in box.xyxy[0]]
+                conf = float(box.conf[0])
+                cls_id = int(box.cls[0])
+                cls_name = KOREAN_CLASSES.get(model.names[cls_id], model.names[cls_id])
 
-        detections = []
-        for box in results[0].boxes:
-            x1, y1, x2, y2 = [float(i) for i in box.xyxy[0]]
-            conf = float(box.conf[0])
-            cls_id = int(box.cls[0])
-            cls_name = KOREAN_CLASSES.get(model.names[cls_id], model.names[cls_id])
-            detections.append({
-                "label": cls_name,
-                "confidence": conf,
-                "boundingBox": {
-                    "x": x1 / cv_image.shape[1],
-                    "y": y1 / cv_image.shape[0],
-                    "width": (x2 - x1) / cv_image.shape[1],
-                    "height": (y2 - y1) / cv_image.shape[0]
-                }
-            })
+                # ✅ DB 저장
+                db.add(Analysis(
+                    username=current_user.nickname,
+                    ripeness=cls_name,
+                    confidence=conf,
+                    image_path=file.filename,
+                    video_path=f"/results/{task_id}_final.mp4"
+                ))
+            
+                detections.append({
+                    "label": cls_name,
+                    "confidence": conf,
+                    "boundingBox": {
+                        "x": x1 / cv_image.shape[1],
+                        "y": y1 / cv_image.shape[0],
+                        "width": (x2 - x1) / cv_image.shape[1],
+                        "height": (y2 - y1) / cv_image.shape[0]
+                    }
+                })
 
-        image_results.append({"filename": file.filename, "detections": detections})
+            image_results.append({"filename": file.filename, "detections": detections})
+        db.commit()
+    finally:
+        db.close()
 
     # ✅ 백그라운드 스레드 실행
     thread = threading.Thread(target=create_analysis_video, args=(task_id, images))
@@ -656,25 +708,20 @@ def get_summary_stats():
         today_date = datetime.now(timezone("Asia/Seoul")).date()
         yesterday_date = today_date - timedelta(days=1)
 
-        # 전체 분석 건수
         total_count = db.query(func.count(Analysis.id)).scalar()
 
-        # 오늘 분석 건수
         today_count = db.query(func.count(Analysis.id)).filter(
             func.date(Analysis.created_at) == today_date
         ).scalar()
 
-        # 어제 분석 건수
         yesterday_count = db.query(func.count(Analysis.id)).filter(
             func.date(Analysis.created_at) == yesterday_date
         ).scalar()
 
-        # 오늘 이전까지 총 건수
         total_before_today = db.query(func.count(Analysis.id)).filter(
             func.date(Analysis.created_at) < today_date
         ).scalar()
 
-        # 숙성도 종류별 카운트
         ripeness_counts_query = (
             db.query(Analysis.ripeness, func.count(Analysis.id))
             .group_by(Analysis.ripeness)
@@ -682,7 +729,6 @@ def get_summary_stats():
         )
         ripeness_counts = {ripeness: count for ripeness, count in ripeness_counts_query}
 
-        # 어제까지 숙성도 종류
         ripeness_types_yesterday = (
             db.query(Analysis.ripeness)
             .filter(func.date(Analysis.created_at) <= yesterday_date)
@@ -690,9 +736,13 @@ def get_summary_stats():
             .count()
         )
 
-        # ✅ 평균 정확도(Confidence)
-        avg_confidence_today = db.query(func.avg(Analysis.confidence)).filter(func.date(Analysis.created_at) == today_date).scalar() or 0
-        avg_confidence_yesterday = db.query(func.avg(Analysis.confidence)).filter(func.date(Analysis.created_at) == yesterday_date).scalar() or 0
+        avg_confidence_today = db.query(func.avg(Analysis.confidence)).filter(
+            func.date(Analysis.created_at) == today_date
+        ).scalar() or 0
+
+        avg_confidence_yesterday = db.query(func.avg(Analysis.confidence)).filter(
+            func.date(Analysis.created_at) == yesterday_date
+        ).scalar() or 0
 
         return {
             "today": today_count,
@@ -701,8 +751,8 @@ def get_summary_stats():
             "total_before_today": total_before_today,
             "ripeness_counts": ripeness_counts,
             "ripeness_types_yesterday": ripeness_types_yesterday,
-            "avg_confidence_today": round(avg_confidence_today * 100, 2),  # %
-            "avg_confidence_yesterday": round(avg_confidence_yesterday * 100, 2) # %
+            "avg_confidence_today": round(avg_confidence_today * 100, 2),
+            "avg_confidence_yesterday": round(avg_confidence_yesterday * 100, 2)
         }
     finally:
         db.close()
