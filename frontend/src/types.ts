@@ -14,24 +14,15 @@ export interface AuthContextType {
 
 // YOLO 백엔드로부터 받는 분석 결과 타입
 export interface YoloAnalysisResult {
-  ripeness: string;
-  confidence: number;
+  label: string;                // YOLO 감지 클래스명 (ex: "완숙", "과숙")
+  confidence: number;           // 신뢰도 (0~1)
   boundingBox: {
-    x: number;      // 상대 좌표 (0-1)
-    y: number;      // 상대 좌표 (0-1)
-    width: number;  // 상대 크기 (0-1)
-    height: number; // 상대 크기 (0-1)
+      x: number;      // 상대 좌표 (0-1)
+      y: number;      // 상대 좌표 (0-1)
+      width: number;  // 상대 크기 (0-1)
+      height: number; // 상대 크기 (0-1)
   };
 }
-
-// Gemini API로부터 받는 분석 결과 타입
-export interface GeminiAnalysisResult {
-    ripeness: string;
-    condition_description: string;
-    best_use: string;
-    fun_fact: string;
-}
-
 
 // 분석 이력에 사용될 타입 (대시보드 등)
 export interface AnalysisHistory {

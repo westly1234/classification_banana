@@ -40,21 +40,14 @@ export default function App() {
         <AuthProvider>
             <HashRouter>
                 <Routes>
-                    {/* 1. 인증이 필요 없는 라우트 */}
+                    <Route path="/" element={<Navigate to="/auth" replace />} />
                     <Route path="/auth" element={<AuthPage />} />
 
-                    {/* 2. 인증이 필요한 라우트들은 부모 Route 안에 중첩시킵니다. */}
                     <Route element={<ProtectedRoute />}>
-                        {/* 이 부모 Route가 모든 자식들을 보호합니다. */}
-                        
-                        <Route path="/" element={<Navigate to="/analyze" replace />} />
                         <Route path="/analyze" element={<MainLayout><Analyze /></MainLayout>} />
                         <Route path="/dashboard" element={<MainLayout><Dashboard /></MainLayout>} />
-                        
-                        {/* 여기에 다른 보호된 페이지들을 계속 추가할 수 있습니다. */}
                     </Route>
-                    
-                    {/* 일치하는 라우트가 없을 경우 기본 페이지로 리디렉션 */}
+
                     <Route path="*" element={<Navigate to="/" />} />
                 </Routes>
             </HashRouter>
