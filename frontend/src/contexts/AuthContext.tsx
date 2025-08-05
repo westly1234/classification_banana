@@ -17,17 +17,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     try {
-        const savedUser = localStorage.getItem("user");
-        const token = localStorage.getItem("access_token");
+      const savedUser = localStorage.getItem("user");
+      const token = localStorage.getItem("access_token");
 
-        if (savedUser && token) {
-            setUser(JSON.parse(savedUser));
-        }
+      if (savedUser && token) {
+        setUser(JSON.parse(savedUser));
+      } else {
+        // ✅ 둘 중 하나라도 없으면 로그아웃 처리
+        setUser(null);
+      }
     } catch (error) {
-        console.error("사용자 정보 복원 실패", error);
-        setUser(null); // 에러 발생 시 확실하게 로그아웃 처리
+      console.error("사용자 정보 복원 실패", error);
+      setUser(null);
     } finally {
-        setLoading(false); // 정보 복원 시도 후 로딩 상태 해제
+      setLoading(false);
     }
   }, []);
 

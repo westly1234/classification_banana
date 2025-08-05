@@ -1,6 +1,7 @@
 # backend/models.py
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, LargeBinary, Date
+from sqlalchemy.sql import func
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 import pytz
@@ -24,9 +25,22 @@ class Analysis(Base):
     __tablename__ = "analysis"
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, index=True)            # 사용자 이메일 or "anonymous"
-    ripeness = Column(String, index=True)            # ex: "완숙"
+    username = Column(String)
+    ripeness = Column(String)
+    freshness = Column(Float, nullable=True)
     confidence = Column(Float)
-    image_path = Column(String, nullable=True)       # ✅ 이미지 경로
-    video_path = Column(String, nullable=True)       # ✅ 비디오 경로
-    created_at = Column(DateTime, default=get_kst_now)
+    image_path = Column(String, nullable=True)
+    video_path = Column(String, nullable=True)
+    image_blob = Column(LargeBinary, nullable=True)
+    video_blob = Column(LargeBinary, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class DailyAnalysisStat(Base):
+    __tablename__ = "daily_analysis_stat"
+
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(Date, nullable=False, unique=True)  # 날짜
+    variety_count = Column(Integer, default=0)         # 다양성 (종류 수)
+    freshness = Column(Float, default=0.0)              # 신선도(%)
+    accuracy = Column(Float, default=0.0)               # 정확도(%)
+    total_count = Column(Integer, default=0)            # 총 분석 수

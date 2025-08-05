@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { HashRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import Sidebar from './components/Sidebar';
@@ -26,31 +26,66 @@ const ProtectedRoute: React.FC = () => { // children prop은 더 이상 필요 �
 };
 
 // 메인 레이아웃 컴포넌트
-const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <div className="flex h-screen bg-brand-gray-100">
-        <Sidebar />
-        <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
-            {children}
-        </main>
-    </div>
+const MainLayout: React.FC<{
+  children: React.ReactNode;
+  isSidebarOpen: boolean;
+  toggleSidebar: () => void;
+}> = ({ children, isSidebarOpen, toggleSidebar }) => (
+  <div className="flex h-screen bg-brand-gray-100 relative">
+    {/* ✅ Sidebar 먼저 렌더링 */}
+    <Sidebar isOpen={isSidebarOpen} toggleSidebar={toggleSidebar} />
+
+    {/* ✅ 햄버거 버튼 (사이드바 열려있을 땐 숨김) */}
+    {!isSidebarOpen && (
+      <button
+        className="md:hidden absolute top-4 left-4 z-50 text-2xl text-gray-800"
+        onClick={toggleSidebar}
+      >
+        ☰
+      </button>
+    )}
+
+    {/* ✅ 메인 콘텐츠 */}
+    <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+      {children}
+    </main>
+  </div>
 );
 
 export default function App() {
-    return (
-        <AuthProvider>
-            <HashRouter>
-                <Routes>
-                    <Route path="/" element={<Navigate to="/auth" replace />} />
-                    <Route path="/auth" element={<AuthPage />} />
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-                    <Route element={<ProtectedRoute />}>
-                        <Route path="/analyze" element={<MainLayout><Analyze /></MainLayout>} />
-                        <Route path="/dashboard" element={<MainLayout><Dashboard /></MainLayout>} />
-                    </Route>
+  const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
 
-                    <Route path="*" element={<Navigate to="/" />} />
-                </Routes>
-            </HashRouter>
-        </AuthProvider>
-    );
+  return (
+    <AuthProvider>
+      <HashRouter>
+        <Routes>
+          <Route path="/" element={<Navigate to="/auth" replace />} />
+          <Route path="/auth" element={<AuthPage />} />
+
+          <Route element={<ProtectedRoute />}>
+            <Route
+              path="/analyze"
+              element={
+                <MainLayout isSidebarOpen={isSidebarOpen} toggleSidebar={toggleSidebar}>
+                  <Analyze />
+                </MainLayout>
+              }
+            />
+            <Route
+              path="/dashboard"
+              element={
+                <MainLayout isSidebarOpen={isSidebarOpen} toggleSidebar={toggleSidebar}>
+                  <Dashboard />
+                </MainLayout>
+              }
+            />
+          </Route>
+
+          <Route path="*" element={<Navigate to="/" />} />
+        </Routes>
+      </HashRouter>
+    </AuthProvider>
+  );
 }
