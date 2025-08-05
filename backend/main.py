@@ -208,11 +208,7 @@ admin = Admin(app, engine, authentication_backend=SimpleAuth(secret_key=SECRET_K
 admin.add_view(UserAdmin)
 admin.add_view(AnalysisAdmin)
 
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://192.168.0.48:5173",
-]
+origins = ["*"]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 

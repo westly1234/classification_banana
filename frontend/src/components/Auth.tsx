@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
 
-const API_BASE = "http://192.168.0.48:8000";// 백엔드 주소
+const API_BASE = "http://127.0.0.1:8000";// 백엔드 주소
 
 export default function AuthPage() {
     const [isLoginView, setIsLoginView] = useState(true);
