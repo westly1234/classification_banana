@@ -22,7 +22,6 @@ interface SummaryData {
   today_variety: number;
   yesterday_variety: number;
 }
-
 interface DailyStat {
   date: string;
   total: number;
@@ -138,7 +137,8 @@ const Dashboard = () => {
     } catch (err) {
       setError("대시보드 데이터를 불러오는 데 실패했습니다. 잠시 후 다시 시도해주세요.");
     }
-  };
+    return null;
+};
 
   useEffect(() => {
     fetchData();
