@@ -208,11 +208,7 @@ admin = Admin(app, engine, authentication_backend=SimpleAuth(secret_key=SECRET_K
 admin.add_view(UserAdmin)
 admin.add_view(AnalysisAdmin)
 
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://192.168.0.48:5173",
-]
+origins = ["*"]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
@@ -288,7 +284,6 @@ def run_yolo_model(image: Image.Image):
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="모델을 사용할 수 없습니다.")
     
     image = image.convert("RGB")
-    # ✅ PIL → OpenCV 변환
     img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
     # ✅ Letterbox 적용 (YOLO 학습 해상도 기준)
@@ -299,26 +294,39 @@ def run_yolo_model(image: Image.Image):
 
     analysis_results = []
     VALID_CLASSES = {"ripe", "unripe", "freshripe", "freshunripe", "overripe", "rotten"}
+    valid_detected = False
 
     if results.boxes:
         for box in results.boxes:
-            cls_name = model.names[int(box.cls.item())]
-            if cls_name in VALID_CLASSES:
-                conf = float(box.conf.item())
-                freshness = FRESHNESS_MAP.get(cls_name, 0.0)
-                x1, y1, x2, y2 = box.xyxy[0]
-                bbox = {
-                    "x": round(x1.item() / 640, 4),  # 정규화 기준: letterbox 기준 해상도
-                    "y": round(y1.item() / 480, 4),
-                    "width": round((x2 - x1).item() / 640, 4),
-                    "height": round((y2 - y1).item() / 480, 4),
-                }
-                analysis_results.append({
-                    "ripeness": KOREAN_CLASSES.get(cls_name, cls_name),
-                    "confidence": round(conf, 3),
-                    "freshness": round(freshness, 3),
-                    "boundingBox": bbox
-                })
+            cls_idx = int(box.cls.item())
+            cls_name = model.names[cls_idx]
+
+            # ✅ 바나나 관련 클래스만 필터링
+            if cls_name not in VALID_CLASSES:
+                continue
+
+            valid_detected = True
+            conf = float(box.conf.item())
+            freshness = FRESHNESS_MAP.get(cls_name, 0.0)
+            x1, y1, x2, y2 = box.xyxy[0]
+
+            bbox = {
+                "x": round(x1.item() / 640, 4),
+                "y": round(y1.item() / 480, 4),
+                "width": round((x2 - x1).item() / 640, 4),
+                "height": round((y2 - y1).item() / 480, 4),
+            }
+
+            analysis_results.append({
+                "ripeness": KOREAN_CLASSES.get(cls_name, cls_name),
+                "confidence": round(conf, 3),
+                "freshness": round(freshness, 3),
+                "boundingBox": bbox
+            })
+
+    # ✅ 바나나 클래스가 하나도 없으면 빈 리스트 반환
+    if not valid_detected:
+        return []
 
     return analysis_results
 
@@ -455,6 +463,17 @@ def update_daily_analysis_stat(db: Session, target_date: date):
     ).all()
 
     if not records:
+        stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == target_date).first()
+        if not stat:
+            stat = DailyAnalysisStat(date=target_date)
+            db.add(stat)
+
+        stat.total_count = 0
+        stat.accuracy = 0.0
+        stat.freshness = 0.0
+        stat.variety_count = 0
+
+        db.commit()
         return
 
     total = len(records)
@@ -869,8 +888,6 @@ def get_stats(db: Session = Depends(get_db)):
         "ripeness_counts": ripeness_counts
     }
 
-from datetime import date
-
 @stats_router.get("/stats/daily")
 def get_daily_stats(db: Session = Depends(get_db)):
     today = datetime.now(KST).date()
@@ -931,7 +948,12 @@ def get_summary_stats():
         yesterday = today - timedelta(days=1)
 
         today_stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == today).first()
-        yest_stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == yesterday).first()
+        yest_stat = (
+            db.query(DailyAnalysisStat)
+            .filter(DailyAnalysisStat.date < today)
+            .order_by(DailyAnalysisStat.date.desc())
+            .first()
+        )
 
         total_count = db.query(func.count(Analysis.id)).scalar()
 
@@ -967,7 +989,7 @@ def get_summary_stats():
         acc_yest = round(yest_stat.accuracy or 0, 2) if yest_stat else 0.0
         fresh_today = today_stat.freshness if today_stat else 0.0
         fresh_yest = yest_stat.freshness if yest_stat else 0.0
-
+        
         return {
             "today": today_stat.total_count if today_stat else 0,
             "yesterday": yest_stat.total_count if yest_stat else 0,
@@ -978,7 +1000,9 @@ def get_summary_stats():
             "avg_confidence_today": acc_today,
             "avg_confidence_yesterday": acc_yest,
             "avg_freshness_today": fresh_today,
-            "avg_freshness_yesterday": fresh_yest
+            "avg_freshness_yesterday": fresh_yest,
+            "today_variety": today_stat.variety_count if today_stat else 0,
+            "yesterday_variety": yest_stat.variety_count if yest_stat else 0,
         }
 
     except Exception as e:
@@ -995,7 +1019,6 @@ def generate_today_stats():
         update_daily_analysis_stat(db, datetime.now(KST).date())
     finally:
         db.close()
-
 
 # --- 최종 라우터 등록 ---
 app.include_router(auth_router) # @app.post('/login') 등을 여기에 포함시키려면 auth_router로 변경해야 함
