@@ -3,7 +3,7 @@ import type { YoloAnalysisResult } from '../types';
 
 // 실제 FastAPI 백엔드 주소입니다.
 // 로컬에서 FastAPI 서버를 실행하는 경우 보통 이 주소를 사용합니다.
-const API_ENDPOINT = 'http://localhost:8000/analyze';
+const API_ENDPOINT = `http://${window.location.hostname}:8000/analyze`;
 
 /**
  * base64로 인코딩된 이미지를 YOLO 백엔드 서버로 보내 분석을 요청하는 함수

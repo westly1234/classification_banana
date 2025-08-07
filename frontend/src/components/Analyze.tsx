@@ -18,7 +18,7 @@ interface AnalysisState {
 }
 type StorableAnalysisState = Omit<AnalysisState, 'file'> & { fileName: string; fileType: string };
 
-const API_BASE = "http://192.168.0.48:8000";
+const API_BASE = `http://${window.location.hostname}:8000`;
 
 const fileToBase64 = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {

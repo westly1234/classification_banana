@@ -2,7 +2,7 @@
 
 import axios from 'axios';
 
-const API_BASE = "http://192.168.0.48:8000";
+const API_BASE = `http://${window.location.hostname}:8000`;
 
 const api = axios.create({
     baseURL: API_BASE,

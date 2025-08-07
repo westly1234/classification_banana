@@ -440,11 +440,18 @@ def verify_email(token: str, db: Session = Depends(get_db)):
 @app.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="잘못된 로그인 정보입니다.")
-    if user.is_verified == 0:
+    if not user:
+        raise HTTPException(status_code=404, detail="존재하지 않는 이메일입니다.")
+    if not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다.")
+    if not user.is_verified:
         raise HTTPException(status_code=403, detail="이메일 인증 후 로그인 가능합니다.")
-    access_token = jwt.encode({"sub": user.email, "nickname": user.nickname}, SECRET_KEY, algorithm=ALGORITHM)
+
+    access_token = jwt.encode({
+        "sub": user.email,
+        "nickname": user.nickname,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    }, SECRET_KEY, algorithm=ALGORITHM)
     return {"access_token": access_token, "token_type": "bearer"}
 
 # 통계 갱신 전용 함수

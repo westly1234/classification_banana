@@ -51,6 +51,10 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
 app = FastAPI()
 
 def get_db():
@@ -73,15 +77,15 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
 
 # 로그인
 @app.post("/login", response_model=Token)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == form_data.username).first()
+def login(data: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == data.email).first()
     if not user:
         raise HTTPException(status_code=404, detail="존재하지 않는 이메일입니다.")
-    if not verify_password(form_data.password, user.password_hash):
+    if not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다.")
     if not user.is_verified:
         raise HTTPException(status_code=403, detail="이메일 인증 후 로그인 가능합니다.")
-    
+
     access_token = jwt.encode({
         "sub": user.email,
         "nickname": user.nickname,
