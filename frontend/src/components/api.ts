@@ -41,7 +41,7 @@ api.interceptors.response.use(
       localStorage.removeItem("access_token");
       alert("세션이 만료되었습니다. 다시 로그인해주세요.");
       window.location.replace("/#/auth"); // ✅ HashRouter 경로
-      return; // 이후 진행 막기
+      return Promise.reject(err); // ⬅️ 호출부로 명확히 에러를 전파 (✅)
     }
 
     return Promise.reject(err);

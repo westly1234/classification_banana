@@ -1,4 +1,4 @@
-// --- 생략 없이 전체 제공합니다 ---
+// src/components/Analyze.tsx
 import { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -220,6 +220,7 @@ export default function Analyze() {
             idsToAnalyze.has(s.id) ? { ...s, isLoading: false, error: msg } : s
           )
         );
+        setIsAnalyzing(false); // 버튼 다시 활성화
         reject(reqError);
       }
     });
