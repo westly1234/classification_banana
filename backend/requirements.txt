@@ -23,11 +23,10 @@ numpy==1.26.4
 pillow==10.3.0
 opencv-python-headless==4.9.0.80
 
-# --- 딥러닝 (CPU 전용) ---
-torch==2.2.0+cpu
-torchvision==0.17.0+cpu
-torchaudio==2.2.0+cpu
---extra-index-url https://download.pytorch.org/whl/cpu
+# --- 딥러닝 ---
+torch==2.2.0
+torchvision==0.17.0
+torchaudio==2.2.0
 
 # --- YOLO ---
 ultralytics==8.2.0
