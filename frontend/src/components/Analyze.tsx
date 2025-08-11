@@ -136,7 +136,7 @@ export default function Analyze() {
     );
     try {
       const base64Image = await fileToBase64(targetState.file);
-      const res = await api.post<ImageAnalysisResultPayload>(`/analyze`, { image: base64Image });
+      const res = await api.post<ImageAnalysisResultPayload>(`/analyze`, { image: base64Image }, { timeout: 60000 });
       const { detections, avg_confidence } = res.data;
       const formattedDetections = detections.map(d => ({ ...d, label: d.ripeness }));
       setAnalysisStates(prev =>
@@ -147,8 +147,10 @@ export default function Analyze() {
         )
       );
     } catch (err: any) {
-      const msg = err.response?.data?.detail || '분석 실패';
-      setAnalysisStates(prev =>
+        const msg =
+          err.response?.data?.detail ||
+          (err.code === 'ECONNABORTED' ? '요청 시간이 초과되었습니다. 잠시 후 다시 시도하세요.' : '분석 실패');
+        setAnalysisStates(prev =>
         prev.map(s => (s.id === targetState.id ? { ...s, error: msg, isLoading: false } : s))
       );
     }
@@ -167,7 +169,7 @@ export default function Analyze() {
         const res = await api.post<{ task_id: string; results: ImageAnalysisResultPayload[] }>(
           `/analyze_video`,
           formData,
-          { headers: { 'Content-Type': 'multipart/form-data' } }
+          { timeout: 120000 } // (선택) 업로드는 타임아웃 여유
         );
         const { task_id, results } = res.data;
         const resultsMap = new Map(results.map(r => [r.filename, r]));
