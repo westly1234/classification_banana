@@ -1047,6 +1047,11 @@ def generate_today_stats():
     finally:
         db.close()
 
+# 서버 자동 깨우기
+@app.get("/ping")
+def ping():
+    return {"ok": True, "ts": datetime.now(KST).isoformat()}
+
 # --- 최종 라우터 등록 ---
 app.include_router(auth_router) # @app.post('/login') 등을 여기에 포함시키려면 auth_router로 변경해야 함
 app.include_router(analysis_router)

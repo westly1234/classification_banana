@@ -1,4 +1,4 @@
-// src/api.ts
+// src/components/api.ts
 import axios from "axios";
 
 const API_BASE = import.meta.env.VITE_API_BASE;
