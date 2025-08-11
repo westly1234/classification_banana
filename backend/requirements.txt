@@ -29,7 +29,7 @@ torchvision==0.17.0
 torchaudio==2.2.0
 
 # --- YOLO ---
-ultralytics==8.2.0
+ultralytics==8.3.168
 
 # --- 기타 ---
 Jinja2==3.1.4
