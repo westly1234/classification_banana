@@ -202,19 +202,39 @@ class SimpleAuth(AuthenticationBackend):
             return False 
         
 # --- 🧠 FastAPI 앱 생성 ---
+# 프론트 주소(배포/로컬)
+FRONT_URL = "https://classification-banana-2.onrender.com"
+
+# (원하면 문서 숨김: docs_url=None, redoc_url=None)
 app = FastAPI(title="바나나 YOLO 분석")
 
 admin = Admin(app, engine, authentication_backend=SimpleAuth(secret_key=SECRET_KEY))
 admin.add_view(UserAdmin)
 admin.add_view(AnalysisAdmin)
 
-origins = ["*"]
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+# ✅ CORS: 프론트 도메인만 허용
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONT_URL, "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# 동영상 임시 저장 폴더 설정 (한 번만 선언)
+# ✅ 세션 쿠키 보안 옵션 (SQLAdmin용)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    https_only=True,
+    same_site="lax",
+    max_age=60 * 60 * 8,  # 8시간
+)
+
+# ✅ 결과 폴더
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
+
+# ⬇️ 유지: SQLAdmin 미리보기가 <video src="/results/..."> 를 쓰므로 public mount는 남겨둔다
 app.mount("/results", StaticFiles(directory=RESULTS_DIR), name="results")
 
 # 작업 상태 임시 저장소
