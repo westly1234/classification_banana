@@ -1,5 +1,5 @@
 // src/components/Analyze.tsx
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { YoloAnalysisResult, ImageAnalysisResultPayload } from '../types';
@@ -19,6 +19,17 @@ interface AnalysisState {
 type StorableAnalysisState = Omit<AnalysisState, 'file'> & { fileName: string; fileType: string };
 
 const API_BASE = import.meta.env.VITE_API_BASE;
+
+const MAX_FILES = 5;                 // 한 번에 최대 5장
+const MAX_SIZE = 2 * 1024 * 1024;    // 각 파일 최대 2MB
+
+const pollRef = useRef<number | null>(null);
+
+useEffect(() => {
+  return () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+  };
+}, []);
 
 const fileToBase64 = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -81,11 +92,19 @@ export default function Analyze() {
     });
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    const validFiles = acceptedFiles.filter(f => f.size > 0 && f.type.startsWith('image/'));
-    if (validFiles.length === 0) return;
+    // 이미지 타입만, 크기 제한, 개수 제한
+    const filtered = acceptedFiles
+      .filter(f => f.size > 0 && f.type.startsWith('image/'))
+      .filter(f => f.size <= MAX_SIZE)
+      .slice(0, MAX_FILES);
+
+    if (filtered.length === 0) {
+      setTaskStatus(`이미지 개수/크기 제한을 확인하세요. (최대 ${MAX_FILES}장, 각 ${Math.round(MAX_SIZE/1024/1024)}MB 이하)`);
+      return;
+    }
 
     const newStates: AnalysisState[] = await Promise.all(
-      validFiles.map(async file => ({
+      filtered.map(async file => ({
         id: `${file.name}-${file.lastModified}-${Math.random()}`,
         file,
         previewUrl: await fileToBase64Url(file),
@@ -96,9 +115,11 @@ export default function Analyze() {
         avg_confidence: undefined,
       }))
     );
+
     setVideoUrl(null);
     setTaskStatus(null);
     sessionStorage.removeItem('lastVideoUrl');
+
     setAnalysisStates(prev => {
       const combined = [...prev, ...newStates];
       if (!mainViewerUrl || prev.length === 0) {
@@ -117,6 +138,12 @@ export default function Analyze() {
   const handleAnalyze = async () => {
     const targets = analysisStates.filter(s => s.file?.size > 0 && !s.result && !s.error);
     if (targets.length === 0) return;
+
+    if (targets.length > MAX_FILES) {
+      setTaskStatus(`한 번에 최대 ${MAX_FILES}장만 분석할 수 있어요.`);
+      return;
+    } 
+
     setIsAnalyzing(true);
     setMainViewerUrl(null);
     try {
@@ -189,11 +216,13 @@ export default function Analyze() {
         );
         setTaskStatus('동영상 생성 중...');
         setMainViewerUrl(null);
-        const intervalId = setInterval(async () => {
+        pollRef.current = window.setInterval(async () => {
           try {
             const { data } = await api.get(`/tasks/${task_id}/status`);
             if (data.status === 'SUCCESS' || data.status === 'FAILURE') {
-              clearInterval(intervalId);
+              if (pollRef.current) clearInterval(pollRef.current);
+              pollRef.current = null;
+
               if (data.status === 'SUCCESS') {
                 const finalUrl = `${API_BASE}${data.result}`;
                 setVideoUrl(finalUrl);
@@ -207,13 +236,15 @@ export default function Analyze() {
               }
             }
           } catch (pollError) {
-            clearInterval(intervalId);
+            if (pollRef.current) clearInterval(pollRef.current);
+            pollRef.current = null;
             setTaskStatus('상태 확인 중 오류');
             reject(pollError);
           }
         }, 3000);
       } catch (reqError: any) {
-        const msg = reqError.response?.data?.detail || '요청 실패';
+        const msg = reqError.response?.data?.detail ||   (reqError.code === 'ECONNABORTED' ? '요청 시간이 초과되었습니다. 잠시 후 다시 시도하세요.' :
+          '서버가 바쁘거나 일시적으로 중단되었습니다. 잠시 후 다시 시도하세요.');
         setTaskStatus(msg);
         setAnalysisStates(prev =>
           prev.map(s =>

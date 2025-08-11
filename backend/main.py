@@ -1,17 +1,17 @@
 # --- 📁 backend/main.py ---
 
-import base64, io, uuid, threading, time, smtplib, pytz, cv2, subprocess, numpy as np
+import base64, io, uuid, threading, time, smtplib, pytz, cv2, torch, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
 from markupsafe import Markup
 from PIL import Image, ImageFont, ImageDraw
-from collections import defaultdict, Counter
+from collections import Counter
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # FastAPI 및 관련 라이브러리
-from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -24,7 +24,7 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 # SQLAlchemy 관련 import 문 추가
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, func, LargeBinary, and_
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, func, LargeBinary
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -530,126 +530,102 @@ def update_daily_analysis_stat(db: Session, target_date: date):
 
 # --- 📹 비동기 작업 및 동영상 생성 ---
 
-def create_analysis_video(current_user, task_id: str, image_data_list: list):
+# ===== 리소스 제한 =====
+MAX_FILES = 5                 # 한 번에 최대 5장
+MAX_BYTES = 2 * 1024 * 1024   # 각 파일 최대 2MB
+TARGET_W, TARGET_H = 640, 480 # 작업 해상도
+VIDEO_FPS = 12                # 낮은 FPS
+SECONDS_PER_IMAGE = 1.5       # 이미지 당 체류 시간
+INFER_EVERY_N_FRAMES = 2      # 2프레임에 한 번만 YOLO 추론
+
+def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int = TARGET_H) -> np.ndarray:
+    """이미지를 안전하게 열고 (RGB) 640x480으로 리사이즈 + letterbox."""
+    pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    arr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    return letterbox_image(arr, dst_w, dst_h)
+
+def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarray]):
     """
-    여러 이미지를 받아 스크롤링 분석 비디오를 생성하고 모델 결과를 시각화.
-    최종 출력은 웹 브라우저에서 재생 가능한 MP4(H.264 + yuv420p)로 저장됨.
+    frames_bgr: 이미 TARGET_W x TARGET_H 로 letterbox된 BGR 프레임 목록
+    OpenCV로 바로 mp4 파일 생성 (mp4v). 프레임 간격 샘플링으로 YOLO 부하 감소.
     """
-    intermediate_video_path = RESULTS_DIR / f"{task_id}_intermediate.avi"
-    final_avi_path = RESULTS_DIR / f"{task_id}_final.avi"
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
-
-    video_writer, cap, final_writer = None, None, None
-
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # 브라우저 재생 가능(대부분)
+    writer = None
     db = SessionLocal()
+
     try:
         tasks[task_id] = {"status": "PROCESSING", "result": None}
-        print(f"[{task_id}] 비디오 생성 시작...")
+        print(f"[{task_id}] 비디오 생성 시작... (frames={len(frames_bgr)})")
 
-        output_width, output_height, fps = 640, 480, 15
+        w, h = TARGET_W, TARGET_H
+        writer = cv2.VideoWriter(str(final_video_path), fourcc, VIDEO_FPS, (w, h))
+        if not writer.isOpened():
+            raise IOError("VideoWriter 초기화 실패")
 
-        # 1) 이미지 디코딩 및 검증
-        valid_imgs = []
-        for index, img_data in enumerate(image_data_list):
-            try:
-                pil_image = Image.open(io.BytesIO(img_data)).convert("RGB")  # ✅ 바로 열기
-                cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-                valid_imgs.append(letterbox_image(cv_image, output_width, output_height))
-            except Exception as img_err:
-                print(f"[{task_id}] 경고: {index+1}번째 이미지 처리 실패 → 건너뜀. 오류: {img_err}")
-                continue
+        # 총 프레임 수 계산
+        total_frames = int(len(frames_bgr) * SECONDS_PER_IMAGE * VIDEO_FPS)
 
-        if len(valid_imgs) < 1:
-            raise ValueError("비디오 생성을 위한 유효한 이미지가 없습니다.")
+        # 프레임 스트림 만들기(가로 스크롤 효과 그대로 유지)
+        total_img_width = w * len(frames_bgr)
+        infer_conf_list, ripeness_labels = [], []
 
-        total_img_width = output_width * len(valid_imgs)
-
-        # 2) 중간 비디오 생성
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-        video_writer = cv2.VideoWriter(str(intermediate_video_path), fourcc, fps, (output_width, output_height))
-
-        SECONDS_PER_IMAGE = 3
-        fps = 15
-        
-        video_duration = len(valid_imgs) * SECONDS_PER_IMAGE
-        total_frames = int(fps * video_duration)
         for i in range(total_frames):
-            current_x = int((total_img_width - output_width) * (i / (total_frames - 1)))
-            frame = np.zeros((output_height, output_width, 3), dtype=np.uint8)
+            current_x = int((total_img_width - w) * (i / max(1, total_frames - 1)))
+            frame = np.zeros((h, w, 3), dtype=np.uint8)
             frame_x = 0
-            for img in valid_imgs:
-                img_resized = letterbox_image(img, output_width, output_height)
+            for img in frames_bgr:
                 img_start = frame_x - current_x
-                img_end = (frame_x + output_width) - current_x
-                if img_end > 0 and img_start < output_width:
+                img_end = (frame_x + w) - current_x
+                if img_end > 0 and img_start < w:
                     src_start = max(0, -img_start)
-                    src_end = min(output_width, output_width - img_start)
+                    src_end   = min(w, w - img_start)
                     dst_start = max(0, img_start)
-                    dst_end = min(output_width, img_end)
+                    dst_end   = min(w, img_end)
                     if src_end > src_start and dst_end > dst_start:
-                        frame[:, dst_start:dst_end] = img_resized[:, src_start:src_end]
-                frame_x += output_width
-            video_writer.write(frame)
-        video_writer.release()
-        video_writer = None
-        time.sleep(0.5)
+                        frame[:, dst_start:dst_end] = img[:, src_start:src_end]
+                frame_x += w
 
-        # 3) 모델 결과를 입힌 최종 AVI 생성
-        cap = cv2.VideoCapture(str(intermediate_video_path))
-        if not cap.isOpened():
-            raise IOError("중간 비디오 파일을 열 수 없습니다.")
+            # 🔻 부하 절감: N프레임마다만 추론
+            if model and (i % INFER_EVERY_N_FRAMES == 0):
+                try:
+                    with torch.no_grad():
+                        results = model(frame, verbose=False)
+                    for box in results[0].boxes:
+                        x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
+                        conf = float(box.conf[0])
+                        cls_id = int(box.cls[0])
+                        cls_name = model.names[cls_id]
+                        label_ko = KOREAN_CLASSES.get(cls_name, cls_name)
 
-        final_writer = cv2.VideoWriter(str(final_avi_path), fourcc, fps, (output_width, output_height))
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+                        # 박스 & 라벨
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                        try:
+                            pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                            draw = ImageDraw.Draw(pil_frame, "RGBA")
+                            # 폰트가 없으면 기본폰트 fallback
+                            try:
+                                font = ImageFont.truetype("fonts/NanumGothic.ttf", 20)
+                            except Exception:
+                                font = ImageFont.load_default()
+                            text = f"{label_ko} {conf:.2f}"
+                            tw, th = draw.textlength(text, font=font), 18
+                            ty = max(0, y1 - th - 4)
+                            draw.rectangle([(x1, ty), (x1 + int(tw) + 6, ty + th + 6)], fill=(0,0,0,160))
+                            draw.text((x1 + 3, ty + 3), text, font=font, fill=(255,255,255,255))
+                            frame = cv2.cvtColor(np.array(pil_frame), cv2.COLOR_RGB2BGR)
+                        except Exception:
+                            pass
 
-            if model:
-                results = model(frame, verbose=False)
-                for box in results[0].boxes:
-                    x1, y1, x2, y2 = [int(i) for i in box.xyxy[0]]
-                    conf = float(box.conf[0])
-                    cls_id = int(box.cls[0])
-                    cls_name = KOREAN_CLASSES.get(model.names[cls_id], model.names[cls_id])
-                    label = f"{cls_name} {conf:.2f}"
+                        infer_conf_list.append(conf)
+                        ripeness_labels.append(label_ko)
+                except Exception as e:
+                    # 추론 실패해도 프레임은 계속 작성
+                    print(f"[{task_id}] 추론 스킵: {e}")
 
-                    # ✅ 노란색 박스
-                    color = (0, 255, 255)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+            writer.write(frame)
 
-                    # ✅ Pillow로 반투명 검정 + 흰 글씨
-                    pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                    draw = ImageDraw.Draw(pil_frame, "RGBA")
-                    font = ImageFont.truetype("fonts/NanumGothic.ttf", 24)
-
-                    text_bbox = draw.textbbox((0, 0), label, font=font)
-                    text_w = text_bbox[2] - text_bbox[0]
-                    text_h = text_bbox[3] - text_bbox[1]
-
-                    # y좌표 보정
-                    text_y = y1 - text_h - 8
-                    if text_y < 0:
-                        text_y = y1 + 5  # 텍스트를 박스 아래쪽으로 그리기
-
-                    draw.rectangle([(x1, text_y), (x1 + text_w + 6, text_y + text_h + 4)], fill=(0, 0, 0, 160))
-                    draw.text((x1 + 3, text_y + 2), label, font=font, fill=(255, 255, 255, 255))
-                    frame = cv2.cvtColor(np.array(pil_frame), cv2.COLOR_RGB2BGR)
-
-            final_writer.write(frame.astype(np.uint8))
-
-        cap.release()
-        final_writer.release()
-
-        # 4) 브라우저 호환 MP4로 변환
-        ffmpeg_command = [
-            "ffmpeg", "-y", "-i", str(final_avi_path),
-            "-c:v", "libx264", "-preset", "fast",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            str(final_video_path)
-        ]
-        subprocess.run(ffmpeg_command, check=True)
+        writer.release(); writer = None
 
         if not final_video_path.exists() or final_video_path.stat().st_size == 0:
             raise IOError("최종 MP4 파일이 생성되지 않았거나 비어 있음.")
@@ -657,43 +633,22 @@ def create_analysis_video(current_user, task_id: str, image_data_list: list):
         tasks[task_id] = {"status": "SUCCESS", "result": f"/results/{final_video_path.name}"}
         print(f"[{task_id}] ✅ 최종 비디오 생성 성공.")
 
-        with open(final_video_path, "rb") as f:
-            video_bytes = f.read()
-
-        # DB 저장 로직
-        ripeness_labels = []
-        confidences = []
-        # 모델 결과를 다시 열어서 가장 많은 ripeness 추출
-        cap = cv2.VideoCapture(str(final_avi_path))
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if model:
-                results = model(frame, verbose=False)
-                for box in results[0].boxes:
-                    cls_id = int(box.cls[0])
-                    conf = float(box.conf[0])
-                    confidences.append(conf)
-                    cls_name = model.names[cls_id]
-                    ripeness = KOREAN_CLASSES.get(cls_name, cls_name)
-                    ripeness_labels.append(ripeness)
-        cap.release()
-
-        # 가장 많은 ripeness 하나 선택
+        # 통계/DB 기록
         if ripeness_labels:
             final_ripeness = Counter(ripeness_labels).most_common(1)[0][0]
         else:
             final_ripeness = "분석불가"
-
         freshness = LABEL_SCORE.get(final_ripeness, 0)
-        avg_conf = round(sum(confidences) / len(confidences), 3) if confidences else 0.0
+        avg_conf = round(sum(infer_conf_list) / len(infer_conf_list), 3) if infer_conf_list else 0.0
+
+        with open(final_video_path, "rb") as f:
+            video_bytes = f.read()
 
         try:
             username = current_user.nickname if current_user else "unknown"
             db.add(Analysis(
                 username=username,
-                ripeness=final_ripeness,  # ✅ 실제 가장 흔한 숙성도로 기록
+                ripeness=final_ripeness,
                 freshness=freshness,
                 confidence=avg_conf,
                 video_path=f"/results/{final_video_path.name}",
@@ -709,20 +664,9 @@ def create_analysis_video(current_user, task_id: str, image_data_list: list):
     except Exception as e:
         tasks[task_id] = {"status": "FAILURE", "result": str(e)}
         print(f"[{task_id}] ❌ 비디오 생성 실패: {e}")
-
     finally:
-        if video_writer is not None:
-            video_writer.release()
-        if cap is not None:
-            cap.release()
-        if final_writer is not None:
-            final_writer.release()
-        if intermediate_video_path.exists():
-            intermediate_video_path.unlink()
-        if final_avi_path.exists():
-            final_avi_path.unlink()
-        if tasks.get(task_id, {}).get("status") == "FAILURE" and final_video_path.exists():
-            final_video_path.unlink()
+        if writer is not None:
+            writer.release()
 
 # --- 동영상 스트리밍 함수 ---
 @app.get("/results/{filename}")
@@ -748,8 +692,9 @@ def analyze_single_image(payload: ImagePayload, current_user: User = Depends(get
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="모델이 현재 사용할 수 없습니다.")
     try:
         image_data = base64.b64decode(payload.image)
-        image = Image.open(io.BytesIO(image_data)).convert("RGB")
-        detections = run_yolo_model(image)  # 기존 YOLO 결과
+        resized_bgr = safe_decode_and_resize(image_data, TARGET_W, TARGET_H)
+        image = Image.fromarray(cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB))
+        detections = run_yolo_model(image)
 
         # ✅ 평균 신뢰도 계산
         avg_conf = sum([d["confidence"] for d in detections]) / len(detections) if detections else 0
@@ -788,38 +733,41 @@ async def start_video_analysis(
     files: List[UploadFile] = File(...),
     current_user: User = Depends(get_current_user)
 ):
-    if len(files) < 1: # [수정] 1장 이상이면 비디오 분석 가능하도록 변경
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="동영상 분석을 위해서는 1장 이상의 이미지가 필요합니다."
-        )
+    if not files or len(files) < 1:
+        raise HTTPException(status_code=400, detail="동영상 분석을 위해서는 1장 이상의 이미지가 필요합니다.")
+    if len(files) > MAX_FILES:
+        raise HTTPException(status_code=413, detail=f"이미지는 최대 {MAX_FILES}장까지 업로드 가능합니다.")
 
     task_id = str(uuid.uuid4())
     tasks[task_id] = {"status": "PENDING", "result": None}
 
-    images_for_video = []  # [핵심 수정] 동영상 생성에 사용할 이미지 데이터 리스트
-    image_results = []     # [핵심 수정] 프론트로 즉시 반환할 분석 결과 리스트
-
-    for file in files:
-        content = await file.read()
+    images_for_video, image_results = [], []
+    for f in files[:MAX_FILES]:
+        content = await f.read()
         if not content:
             continue
-        
-        # [핵심 수정] 동영상 생성을 위해 파일 내용을 리스트에 추가합니다.
-        images_for_video.append(content)
+        if len(content) > MAX_BYTES:
+            image_results.append({
+                "filename": f.filename, "detections": [], "avg_confidence": 0,
+                "error": f"파일 용량(최대 {MAX_BYTES//1024//1024}MB) 초과"
+            })
+            continue
 
-        # --- 각 이미지에 대한 개별 분석을 즉시 수행 ---
+        # 분석용 리사이즈 이미지 한 벌 (가볍게)
         try:
-            pil_image = Image.open(io.BytesIO(content)).convert("RGB")
-            
-            # run_yolo_model 함수를 재사용하여 분석 로직을 통일합니다.
-            detections = run_yolo_model(pil_image)
+            resized_bgr = safe_decode_and_resize(content, TARGET_W, TARGET_H)
+            images_for_video.append(resized_bgr)   # ✅ 이미 numpy(BGR)로 보관
+        except Exception as e:
+            image_results.append({"filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)})
+            continue
 
-            # ✅ 평균 계산
+        # 즉시 1장 분석
+        try:
+            pil_image = Image.fromarray(cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB))
+            detections = run_yolo_model(pil_image)
             avg_conf = sum(d["confidence"] for d in detections) / len(detections) if detections else 0
             avg_fresh = sum(d["freshness"] for d in detections) / len(detections) if detections else 0
 
-            # ✅ DB에 저장
             db = SessionLocal()
             try:
                 db.add(Analysis(
@@ -827,39 +775,29 @@ async def start_video_analysis(
                     ripeness=detections[0]["ripeness"] if detections else "분석불가",
                     confidence=avg_conf,
                     freshness=avg_fresh,
-                    image_blob=content,
+                    image_blob=None,  # 굳이 bytes 저장 안함 → DB 부하 감소
                     created_at=datetime.now(KST)
                 ))
                 db.commit()
             finally:
                 db.close()
 
-            # 프론트엔드로 보낼 결과 데이터 구조를 만듭니다.
             image_results.append({
-                "filename": file.filename,
-                "detections": detections, # run_yolo_model의 결과를 그대로 사용
+                "filename": f.filename,
+                "detections": detections,
                 "avg_confidence": avg_conf
             })
         except Exception as e:
-            # 특정 이미지 분석에 실패하더라도 계속 진행합니다.
-            print(f"파일 분석 실패: {file.filename}, 오류: {e}")
             image_results.append({
-                "filename": file.filename,
-                "detections": [],
-                "avg_confidence": 0,
-                "error": str(e) # 에러 정보 추가
+                "filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)
             })
 
-    # [핵심 수정] 내용이 채워진 images_for_video 리스트를 백그라운드 스레드에 전달합니다.
     if images_for_video:
         thread = threading.Thread(target=create_analysis_video, args=(current_user, task_id, images_for_video))
         thread.start()
     else:
-        # 유효한 이미지가 하나도 없는 경우 즉시 실패 처리
         tasks[task_id] = {"status": "FAILURE", "result": "유효한 이미지가 없습니다."}
 
-
-    # [핵심 수정] 동영상 생성 시작과 동시에, 각 이미지의 분석 결과를 즉시 프론트로 반환합니다.
     return {"task_id": task_id, "results": image_results}
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
@@ -1045,12 +983,11 @@ def generate_today_stats():
     try:
         update_daily_analysis_stat(db, datetime.now(KST).date())
     finally:
-        db.close()
+        db.close()  
 
-# 서버 자동 깨우기
 @app.get("/ping")
 def ping():
-    return {"ok": True, "ts": datetime.now(KST).isoformat()}
+    return {"ok": True}
 
 # --- 최종 라우터 등록 ---
 app.include_router(auth_router) # @app.post('/login') 등을 여기에 포함시키려면 auth_router로 변경해야 함
