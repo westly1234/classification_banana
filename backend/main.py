@@ -230,7 +230,7 @@ def get_db():
 
 # --- YOLO 로드 ---
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "best (2).pt"
+MODEL_PATH = BASE_DIR / "best.pt"
 
 try:
     model = YOLO(MODEL_PATH)
