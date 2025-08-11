@@ -10,11 +10,14 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, '.'),
+      '@': path.resolve(__dirname, 'src'),
     },
   },
   server: {
     host: true,
     port: 5173,
+    proxy: {
+    '/analyze': { target: 'http://localhost:10000', changeOrigin: true },
   },
-});
+},
+})

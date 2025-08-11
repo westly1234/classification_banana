@@ -18,7 +18,7 @@ interface AnalysisState {
 }
 type StorableAnalysisState = Omit<AnalysisState, 'file'> & { fileName: string; fileType: string };
 
-const API_BASE = `http://${window.location.hostname}:8000`;
+const API_BASE = import.meta.env.VITE_API_BASE;
 
 const fileToBase64 = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
