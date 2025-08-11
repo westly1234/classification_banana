@@ -1,43 +1,51 @@
 // src/api.ts
-
-import axios from 'axios';
+import axios from "axios";
 
 const API_BASE = import.meta.env.VITE_API_BASE;
 
 const api = axios.create({
-    baseURL: API_BASE,
+  baseURL: API_BASE,
+  timeout: 30000,
 });
 
-// 요청 인터셉터: 모든 요청에 토큰을 자동으로 추가
+// 요청 인터셉터: Authorization 자동 부착
 api.interceptors.request.use(
-    config => {
-        const token = localStorage.getItem('access_token');
-        if (token) {
-            config.headers['Authorization'] = `Bearer ${token}`;
-        }
-        return config;
-    },
-    error => {
-        return Promise.reject(error);
+  (config) => {
+    const token = localStorage.getItem("access_token");
+    if (token) {
+      // headers가 undefined일 수 있으니 안전하게
+      config.headers = config.headers ?? {};
+      (config.headers as any).Authorization = `Bearer ${token}`;
     }
+    return config;
+  },
+  (error) => Promise.reject(error)
 );
 
-// 응답 인터셉터: 401 에러 발생 시 자동으로 로그아웃 처리
+// 응답 인터셉터: 502 한 번 재시도 + 401 처리
 api.interceptors.response.use(
-    response => {
-        return response;
-    },
-    error => {
-        if (error.response && error.response.status === 401) {
-            // 토큰 관련 에러일 경우, 저장된 정보 삭제 후 로그인 페이지로 이동
-            localStorage.removeItem('access_token');
-            localStorage.removeItem('user');
-            alert("세션이 만료되었습니다. 다시 로그인해주세요.");
-            // 현재 위치를 강제로 변경하여 AuthContext가 리렌더링되도록 함
-            window.location.href = '/auth'; 
-        }
-        return Promise.reject(error);
+  (res) => res,
+  async (err) => {
+    const cfg: any = err.config || {};
+    const status = err.response?.status;
+
+    // 🔁 콜드스타트(502) 1회 재시도
+    if ((!err.response || status === 502) && !cfg.__retry) {
+      cfg.__retry = true;
+      await new Promise((r) => setTimeout(r, 1500));
+      return api.request(cfg);
     }
+
+    // 🔐 인증 만료
+    if (status === 401) {
+      localStorage.removeItem("access_token");
+      alert("세션이 만료되었습니다. 다시 로그인해주세요.");
+      window.location.replace("/#/auth"); // ✅ HashRouter 경로
+      return; // 이후 진행 막기
+    }
+
+    return Promise.reject(err);
+  }
 );
 
 export default api;

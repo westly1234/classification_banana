@@ -2,62 +2,62 @@
 
 import React, { createContext, useContext, useState, useEffect } from "react";
 
-interface AuthContextType {
-  user: { name: string; email: string } | null;
-  loading: boolean; // 로딩 상태 추가
-  login: (userData: { name: string; email: string }) => void;
+type User = { email: string; nickname?: string } | null;
+type Ctx = {
+  user: User;
+  loading: boolean;
+  login: (token: string) => void;
   logout: () => void;
+};
+
+const AuthContext = createContext<Ctx | null>(null);
+
+function decode(token: string): { sub?: string; nickname?: string; exp?: number } | null {
+  try { return JSON.parse(atob(token.split(".")[1])); } catch { return null; }
+}
+function isExpired(exp?: number) {
+  if (!exp) return true;
+  return Date.now() >= exp * 1000;
 }
 
-const AuthContext = createContext<AuthContextType | null>(null);
-
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<{ name: string; email: string } | null>(null);
-  const [loading, setLoading] = useState(true); // 초기 상태는 로딩 중
+  const [user, setUser] = useState<User>(null);
+  const [loading, setLoading] = useState(true);
+
+  const applyToken = (tok: string | null) => {
+    if (!tok) return setUser(null);
+    const p = decode(tok);
+    if (!p || !p.sub || isExpired(p.exp)) return setUser(null);
+    setUser({ email: p.sub, nickname: p.nickname });
+  };
 
   useEffect(() => {
-    try {
-      const savedUser = localStorage.getItem("user");
-      const token = localStorage.getItem("access_token");
-
-      if (savedUser && token) {
-        setUser(JSON.parse(savedUser));
-      } else {
-        // ✅ 둘 중 하나라도 없으면 로그아웃 처리
-        setUser(null);
-      }
-    } catch (error) {
-      console.error("사용자 정보 복원 실패", error);
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
+    applyToken(localStorage.getItem("access_token"));
+    setLoading(false);
+    // 다른 탭에서 로그아웃/로그인 동기화
+    const onStorage = () => applyToken(localStorage.getItem("access_token"));
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  const login = (userData: { name: string; email: string }) => {
-    setUser(userData);
-    localStorage.setItem("user", JSON.stringify(userData));
+  const login = (token: string) => {
+    localStorage.setItem("access_token", token);
+    applyToken(token);
   };
-
   const logout = () => {
-    setUser(null);
-    localStorage.removeItem("user");
     localStorage.removeItem("access_token");
+    setUser(null);
   };
-
-  const value = { user, loading, login, logout };
 
   return (
-    <AuthContext.Provider value={value}>
-      {!loading && children} {/* 로딩이 끝나면 자식 컴포넌트를 렌더링 */}
+    <AuthContext.Provider value={{ user, loading, login, logout }}>
+      {!loading && children}
     </AuthContext.Provider>
   );
 };
 
 export const useAuth = () => {
-    const context = useContext(AuthContext);
-    if (!context) {
-        throw new Error("useAuth must be used within an AuthProvider");
-    }
-    return context;
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within an AuthProvider");
+  return ctx;
 };
