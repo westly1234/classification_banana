@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import Sidebar from './components/Sidebar';
@@ -54,6 +54,10 @@ const MainLayout: React.FC<{
 
 export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    fetch(`${import.meta.env.VITE_API_BASE}/ping`).catch(() => {});
+  }, []);
 
   const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
 
