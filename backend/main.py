@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import base64, io, uuid, threading, time, smtplib, pytz, cv2, torch, numpy as np
+import os, base64, io, uuid, threading, time, smtplib, pytz, cv2, torch, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -59,9 +59,20 @@ def verify_password(plain_password, hashed):
     return pwd_context.verify(plain_password, hashed)
 
 # --- 🗄️ DB 설정 ---
-SQLALCHEMY_DATABASE_URL = "sqlite:///./users.db?check_same_thread=False"
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(bind=engine)
+# Render 환경에서는 DATABASE_URL 환경 변수를 사용하고, 로컬에서는 SQLite를 사용합니다.
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+    # Render의 PostgreSQL URL 형식에 맞게 드라이버 이름을 변경합니다.
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    engine = create_engine(DATABASE_URL)
+else:
+    # 로컬 개발 환경용 SQLite 설정
+    print("⚠️  DATABASE_URL 환경 변수를 찾을 수 없습니다. 로컬 SQLite DB를 사용합니다.")
+    SQLALCHEMY_DATABASE_URL = "sqlite:///./users.db"
+    engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- 👤 사용자 모델 ---
