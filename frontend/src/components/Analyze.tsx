@@ -3,9 +3,9 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { YoloAnalysisResult, ImageAnalysisResultPayload } from '../types';
-import api from './api';
+import api, { API_BASE } from './api';
 import { UploadCloud, Trash2, XCircle, Loader2, Image, Sparkles, Files } from 'lucide-react';
-import ReactPlayer from 'react-player'; // ✅ 추가
+import ReactPlayer from 'react-player';
 
 interface AnalysisState {
   id: string;
@@ -18,8 +18,6 @@ interface AnalysisState {
   avg_confidence?: number;
 }
 type StorableAnalysisState = Omit<AnalysisState, 'file'> & { fileName: string; fileType: string };
-
-const API_BASE = import.meta.env.VITE_API_BASE;
 
 const MAX_FILES = 5;                 // 한 번에 최대 5장
 const MAX_SIZE = 2 * 1024 * 1024;    // 각 파일 최대 2MB
@@ -223,7 +221,11 @@ export default function Analyze() {
               pollRef.current = null;
 
               if (data.status === 'SUCCESS') {
-                const finalUrl = `${API_BASE}${data.result}`;
+                const makeAbsolute = (p: string) =>
+                  /^https?:\/\//i.test(p)
+                    ? p
+                    : `${API_BASE.replace(/\/+$/, "")}${p.startsWith("/") ? "" : "/"}${p}`; 
+                const finalUrl = makeAbsolute(data.result);
                 setVideoUrl(finalUrl);
                 setMainViewerUrl(finalUrl);
                 sessionStorage.setItem('lastVideoUrl', finalUrl);

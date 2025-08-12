@@ -1,9 +1,10 @@
 
 import type { YoloAnalysisResult } from '../types';
+import { API_BASE } from '../components/api';
 
 // 실제 FastAPI 백엔드 주소입니다.
 // 로컬에서 FastAPI 서버를 실행하는 경우 보통 이 주소를 사용합니다.
-const API_BASE = import.meta.env.VITE_API_BASE;
+
 export const API_ENDPOINT = `${API_BASE}/analyze`;
 
 /**

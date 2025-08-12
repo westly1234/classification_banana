@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { API_BASE } from './api';
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE;// 백엔드 주소
 
 export default function AuthPage() {
     const [isLoginView, setIsLoginView] = useState(true);

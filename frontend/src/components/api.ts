@@ -1,7 +1,17 @@
 // src/components/api.ts
 import axios from "axios";
 
-const API_BASE = import.meta.env.VITE_API_BASE;
+function resolveApiBase() {
+  const legacy = import.meta.env.VITE_API_BASE as string | undefined;
+  if (legacy && legacy.trim()) return legacy.replace(/\/+$/, "");
+
+  const host = import.meta.env.VITE_API_HOST as string | undefined; // Render 자동 주입
+  if (host && host.trim()) return `https://${host}`;
+
+  return "http://localhost:8000"; // 로컬 기본값
+}
+
+export const API_BASE = resolveApiBase();   // ← 이 줄 추가
 
 const api = axios.create({
   baseURL: API_BASE,
