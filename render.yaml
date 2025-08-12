@@ -4,12 +4,12 @@ databases:
     plan: free
 
 services:
-  # 1. 백엔드 서비스
+  # 1) Backend
   - type: web
     name: classification-banana-backend
     env: python
     region: singapore
-    plan: free # 무료 플랜
+    plan: free
     rootDir: backend
     buildCommand: |
       pip install --upgrade pip
@@ -19,22 +19,25 @@ services:
     envVars:
       - key: DATABASE_URL
         fromDatabase:
-            property: connectionString
+          name: banana-database 
+          property: connectionString
 
-  # 2. 프론트엔드 서비스
+  # 2) Frontend (Vite)
   - type: web
     name: classification-banana-frontend
     env: static
     rootDir: frontend
-    buildCommand: npm ci && npm run build
+    buildCommand: |
+      npm ci
+      npm run build
     staticPublishPath: dist
     routes:
       - type: rewrite
         source: /*
         destination: /index.html
     envVars:
-      - key: VITE_API_BASE
+      - key: VITE_API_HOST
         fromService:
-            type: web
-            name: classification-banana-backend
-            property: url
+          type: web
+          name: classification-banana-backend
+          property: host              
