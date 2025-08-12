@@ -552,32 +552,46 @@ def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int =
     return letterbox_image(arr, dst_w, dst_h)
 
 def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarray]):
-    """
-    frames_bgr: 이미 TARGET_W x TARGET_H 로 letterbox된 BGR 프레임 목록
-    OpenCV로 바로 mp4 파일 생성 (mp4v). 프레임 간격 샘플링으로 YOLO 부하 감소.
-    """
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # 브라우저 재생 가능(대부분)
+
+    # (A) 상태 업데이트 헬퍼
+    def set_task(status:str, **extra):
+        tasks[task_id] = {**tasks.get(task_id, {}), "status": status, **extra}
+
+    set_task("PROCESSING", result=None)
+    print(f"[{task_id}] 비디오 생성 시작... (frames={len(frames_bgr)})")
+
+    w, h = TARGET_W, TARGET_H
+
+    # (B) 코덱 폴백 시도
+    fourcc_candidates = ["avc1", "mp4v", "XVID", "MJPG"]
     writer = None
-    db = SessionLocal()
+    for cc in fourcc_candidates:
+        fourcc = cv2.VideoWriter_fourcc(*cc)
+        wr = cv2.VideoWriter(str(final_video_path), fourcc, VIDEO_FPS, (w, h))
+        if wr.isOpened():
+            writer = wr
+            print(f"[{task_id}] VideoWriter opened with codec={cc}")
+            break
+        else:
+            wr.release()
+    if writer is None:
+        set_task("FAILURE", result="VideoWriter 초기화 실패(코덱)")
+        print(f"[{task_id}] VideoWriter open failed for all codecs")
+        return
+
+    # (C) 전체 타임아웃(예: 120초)
+    deadline = time.time() + 120
 
     try:
-        tasks[task_id] = {"status": "PROCESSING", "result": None}
-        print(f"[{task_id}] 비디오 생성 시작... (frames={len(frames_bgr)})")
-
-        w, h = TARGET_W, TARGET_H
-        writer = cv2.VideoWriter(str(final_video_path), fourcc, VIDEO_FPS, (w, h))
-        if not writer.isOpened():
-            raise IOError("VideoWriter 초기화 실패")
-
-        # 총 프레임 수 계산
         total_frames = int(len(frames_bgr) * SECONDS_PER_IMAGE * VIDEO_FPS)
-
-        # 프레임 스트림 만들기(가로 스크롤 효과 그대로 유지)
         total_img_width = w * len(frames_bgr)
         infer_conf_list, ripeness_labels = [], []
 
         for i in range(total_frames):
+            if time.time() > deadline:
+                raise TimeoutError("비디오 생성 타임아웃")
+
             current_x = int((total_img_width - w) * (i / max(1, total_frames - 1)))
             frame = np.zeros((h, w, 3), dtype=np.uint8)
             frame_x = 0
@@ -593,87 +607,60 @@ def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarra
                         frame[:, dst_start:dst_end] = img[:, src_start:src_end]
                 frame_x += w
 
-            # 🔻 부하 절감: N프레임마다만 추론
+            # 추론 간소화
             if model and (i % INFER_EVERY_N_FRAMES == 0):
-                try:
-                    with torch.no_grad():
-                        results = model(frame, verbose=False)
+                with torch.no_grad():
+                    results = model(frame, imgsz=(TARGET_W, TARGET_H), conf=0.25, verbose=False)
+                if results and results[0].boxes is not None:
                     for box in results[0].boxes:
                         x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
                         conf = float(box.conf[0])
                         cls_id = int(box.cls[0])
                         cls_name = model.names[cls_id]
                         label_ko = KOREAN_CLASSES.get(cls_name, cls_name)
-
-                        # 박스 & 라벨
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                        try:
-                            pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                            draw = ImageDraw.Draw(pil_frame, "RGBA")
-                            # 폰트가 없으면 기본폰트 fallback
-                            try:
-                                font = ImageFont.truetype("fonts/NanumGothic.ttf", 20)
-                            except Exception:
-                                font = ImageFont.load_default()
-                            text = f"{label_ko} {conf:.2f}"
-                            tw, th = draw.textlength(text, font=font), 18
-                            ty = max(0, y1 - th - 4)
-                            draw.rectangle([(x1, ty), (x1 + int(tw) + 6, ty + th + 6)], fill=(0,0,0,160))
-                            draw.text((x1 + 3, ty + 3), text, font=font, fill=(255,255,255,255))
-                            frame = cv2.cvtColor(np.array(pil_frame), cv2.COLOR_RGB2BGR)
-                        except Exception:
-                            pass
-
-                        infer_conf_list.append(conf)
-                        ripeness_labels.append(label_ko)
-                except Exception as e:
-                    # 추론 실패해도 프레임은 계속 작성
-                    print(f"[{task_id}] 추론 스킵: {e}")
+                        infer_conf_list.append(conf); ripeness_labels.append(label_ko)
 
             writer.write(frame)
 
+            if i % 10 == 0:
+                # 진행률 로그 (선택: 클라이언트에 progress도 내려주려면 tasks에 저장)
+                print(f"[{task_id}] progress {i}/{total_frames}")
+
         writer.release(); writer = None
 
+        # 생성 검증
         if not final_video_path.exists() or final_video_path.stat().st_size == 0:
-            raise IOError("최종 MP4 파일이 생성되지 않았거나 비어 있음.")
+            raise IOError("최종 MP4 파일이 비어 있음")
 
-        tasks[task_id] = {"status": "SUCCESS", "result": f"/results/{final_video_path.name}"}
-        print(f"[{task_id}] ✅ 최종 비디오 생성 성공.")
-
-        # 통계/DB 기록
-        if ripeness_labels:
-            final_ripeness = Counter(ripeness_labels).most_common(1)[0][0]
-        else:
-            final_ripeness = "분석불가"
+        # 결과 기록
+        final_ripeness = Counter(ripeness_labels).most_common(1)[0][0] if ripeness_labels else "분석불가"
         freshness = LABEL_SCORE.get(final_ripeness, 0)
         avg_conf = round(sum(infer_conf_list) / len(infer_conf_list), 3) if infer_conf_list else 0.0
 
-        with open(final_video_path, "rb") as f:
-            video_bytes = f.read()
-
+        # DB 저장
+        db = SessionLocal()
         try:
+            with open(final_video_path, "rb") as f:
+                video_bytes = f.read()
             username = current_user.nickname if current_user else "unknown"
             db.add(Analysis(
-                username=username,
-                ripeness=final_ripeness,
-                freshness=freshness,
-                confidence=avg_conf,
-                video_path=f"/results/{final_video_path.name}",
-                video_blob=video_bytes,
-                created_at=datetime.now(timezone("Asia/Seoul"))
+                username=username, ripeness=final_ripeness, freshness=freshness,
+                confidence=avg_conf, video_path=f"/results/{final_video_path.name}",
+                video_blob=video_bytes, created_at=datetime.now(timezone("Asia/Seoul"))
             ))
             db.commit()
-            today = datetime.now(timezone("Asia/Seoul")).date()
-            update_daily_analysis_stat(db, today)
+            update_daily_analysis_stat(db, datetime.now(timezone("Asia/Seoul")).date())
         finally:
             db.close()
 
+        set_task("SUCCESS", result=f"/results/{final_video_path.name}")
+        print(f"[{task_id}] ✅ 최종 비디오 생성 성공.")
     except Exception as e:
-        tasks[task_id] = {"status": "FAILURE", "result": str(e)}
-        print(f"[{task_id}] ❌ 비디오 생성 실패: {e}")
-    finally:
         if writer is not None:
             writer.release()
+        set_task("FAILURE", result=str(e))
+        print(f"[{task_id}] ❌ 비디오 생성 실패: {e}")
 
 # --- 동영상 스트리밍 함수 ---
 @app.get("/results/{filename}")
