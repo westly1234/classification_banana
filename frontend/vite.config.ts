@@ -17,7 +17,20 @@ export default defineConfig({
     host: true,
     port: 5173,
     proxy: {
-    '/analyze': { target: 'http://localhost:10000', changeOrigin: true },
+      // 인증
+      '/login':           { target: 'http://localhost:10000', changeOrigin: true },
+      '/signup':          { target: 'http://localhost:10000', changeOrigin: true },
+      // 분석
+      '/analyze':         { target: 'http://localhost:10000', changeOrigin: true },
+      '/analyze_video':   { target: 'http://localhost:10000', changeOrigin: true },
+      // 작업 폴링
+      '/tasks':           { target: 'http://localhost:10000', changeOrigin: true },
+      // 통계
+      '/stats':           { target: 'http://localhost:10000', changeOrigin: true },
+      // 결과 파일(동영상)
+      '/results':         { target: 'http://localhost:10000', changeOrigin: true },
+      // 핑(콜드스타트 웜업용)
+      '/ping':            { target: 'http://localhost:10000', changeOrigin: true },
+    },
   },
-},
-})
+});
