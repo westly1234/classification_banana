@@ -9,7 +9,7 @@ services:
     name: classification-banana-backend
     env: python
     region: singapore
-    plan: starter # PyTorch/YOLO는 메모리를 많이 사용하므로 Starter 플랜을 권장합니다.
+    plan: starter
     rootDir: backend
     buildCommand: |
       pip install --upgrade pip
@@ -19,7 +19,7 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.8
-      - key: DATABASE_URL # 생성된 데이터베이스의 주소를 환경변수로 주입합니다.
+      - key: DATABASE_URL
         fromDatabase:
           name: banana-database
           property: connectionString
@@ -28,7 +28,6 @@ services:
   - type: web
     name: classification-banana-frontend
     env: static
-    region: singapore
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
@@ -39,6 +38,5 @@ services:
     envVars:
       - key: VITE_API_BASE
         fromService:
-          type: web
           name: classification-banana-backend
           property: url
