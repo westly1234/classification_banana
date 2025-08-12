@@ -15,8 +15,8 @@ services:
     buildFilter:
       paths:
         included:
-          - backend/**     # << 반드시 문자열 리스트
-        ignored: []         # 없어도 되지만 명시해두면 안전
+          - "backend/**"
+        ignored: []
 
   # === Frontend (Vite static) ===
   - type: web
@@ -36,5 +36,5 @@ services:
     buildFilter:
       paths:
         included:
-          - frontend/**
+          - "frontend/**"
         ignored: []
