@@ -540,15 +540,14 @@ def update_daily_analysis_stat(db: Session, target_date: date):
 # ===== 리소스 제한 =====
 MAX_FILES = 5
 MAX_BYTES = 2 * 1024 * 1024
-TARGET_W, TARGET_H = 480, 360      # 🔁 640x480 → 480x360
+TARGET_W, TARGET_H = 480, 384 
 VIDEO_FPS = 8                      # 🔁 12 → 8
-SECONDS_PER_IMAGE = 1.2            # 🔁 1.5 → 1.2
-INFER_EVERY_N_FRAMES = 3           # 🔁 2 → 3  (3프레임마다 추론)
+SECONDS_PER_IMAGE = 1.2
 
 def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int = TARGET_H) -> np.ndarray:
     """이미지를 안전하게 열고 (RGB) 640x480으로 리사이즈 + letterbox."""
     pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    arr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    arr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)    
     return letterbox_image(arr, dst_w, dst_h)
 
 def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarray]):
@@ -579,9 +578,19 @@ def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarra
         set_task("FAILURE", result="VideoWriter 초기화 실패(코덱)")
         print(f"[{task_id}] VideoWriter open failed for all codecs")
         return
+    
+    # YOLO warmup: 콜드스타트로 첫 프레임에서 버벅이는 것 방지
+    if model:
+        try:
+            with torch.no_grad():
+                _ = model(np.zeros((h, w, 3), dtype=np.uint8),
+                          imgsz=(w, h), conf=0.25, verbose=False)
+            print(f"[{task_id}] warmup done")
+        except Exception as e:
+            print(f"[{task_id}] warmup skip: {e}")
 
-    # (C) 전체 타임아웃(예: 120초)
-    deadline = time.time() + 120
+    # (C) 전체 타임아웃(예: 180초)
+    deadline = time.time() + 180
 
     try:
         total_frames = int(len(frames_bgr) * SECONDS_PER_IMAGE * VIDEO_FPS)
@@ -608,9 +617,10 @@ def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarra
                 frame_x += w
 
             # 추론 간소화
-            if model and (i % INFER_EVERY_N_FRAMES == 0):
+            do_infer = model and (i % INFER_EVERY_N_FRAMES == 1) and i > 5
+            if do_infer:
                 with torch.no_grad():
-                    results = model(frame, imgsz=(TARGET_W, TARGET_H), conf=0.25, verbose=False)
+                    results = model(frame, imgsz=(w, h), conf=0.25, verbose=False)
                 if results and results[0].boxes is not None:
                     for box in results[0].boxes:
                         x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
