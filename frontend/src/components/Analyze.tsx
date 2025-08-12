@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import type { YoloAnalysisResult, ImageAnalysisResultPayload } from '../types';
 import api from './api';
 import { UploadCloud, Trash2, XCircle, Loader2, Image, Sparkles, Files } from 'lucide-react';
+import ReactPlayer from 'react-player'; // ✅ 추가
 
 interface AnalysisState {
   id: string;
@@ -92,7 +93,6 @@ export default function Analyze() {
     });
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    // 이미지 타입만, 크기 제한, 개수 제한
     const filtered = acceptedFiles
       .filter(f => f.size > 0 && f.type.startsWith('image/'))
       .filter(f => f.size <= MAX_SIZE)
@@ -196,7 +196,7 @@ export default function Analyze() {
         const res = await api.post<{ task_id: string; results: ImageAnalysisResultPayload[] }>(
           `/analyze_video`,
           formData,
-          { timeout: 120000 } // (선택) 업로드는 타임아웃 여유
+          { timeout: 120000 }
         );
         const { task_id, results } = res.data;
         const resultsMap = new Map(results.map(r => [r.filename, r]));
@@ -251,7 +251,7 @@ export default function Analyze() {
             idsToAnalyze.has(s.id) ? { ...s, isLoading: false, error: msg } : s
           )
         );
-        setIsAnalyzing(false); // 버튼 다시 활성화
+        setIsAnalyzing(false);
         reject(reqError);
       }
     });
@@ -297,18 +297,21 @@ export default function Analyze() {
                 </motion.div>
               )}
             </AnimatePresence>
+
             {mainViewerUrl &&
               (mainViewerUrl === videoUrl ? (
-                <video
-                  key={mainViewerUrl}
-                  controls
-                  autoPlay
-                  muted
-                  loop
-                  className="w-full h-full max-h-[500px] object-contain rounded-lg"
-                >
-                  <source src={`${mainViewerUrl}?t=${Date.now()}`} type="video/mp4" />
-                </video>
+                // ✅ react-player로 교체 (캐시 방지 쿼리 유지)
+                <div className="w-full h-full max-h-[500px]">
+                  <ReactPlayer
+                    src={`${mainViewerUrl}?t=${Date.now()}`}
+                    controls
+                    playing={false}
+                    muted
+                    loop
+                    width="100%"
+                    height="100%"
+                  />
+                </div>
               ) : (
                 <img
                   src={mainViewerUrl}
@@ -316,6 +319,7 @@ export default function Analyze() {
                   className="w-full h-full object-contain rounded-lg"
                 />
               ))}
+
             {taskStatus && !videoUrl && (
               <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center text-white z-10 p-4">
                 <Loader2 className="w-10 h-10 animate-spin mb-4" />
@@ -333,56 +337,56 @@ export default function Analyze() {
               </h3>
             </div>
             <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-200 hover:scrollbar-thumb-slate-300 scrollbar-track-slate-50">
-                {analysisStates.map(state => (
-                    <div
-                    key={state.id}
-                    onClick={() => !isAnalyzing && setMainViewerUrl(state.previewUrl)}
-                    className={`relative flex-shrink-0 w-36 h-40 sm:w-40 sm:h-44 md:w-44 md:h-48 rounded-xl overflow-hidden cursor-pointer group border-2 ${
-                        mainViewerUrl === state.previewUrl
-                        ? 'border-indigo-500'
-                        : 'border-transparent hover:border-indigo-300'
-                    }`}
-                    >
-                    <div className="relative w-full h-full overflow-visible">
-                        <img
-                            src={state.previewUrl}
-                            alt="preview"
-                            className="w-full h-full object-cover"
-                        />
+              {analysisStates.map(state => (
+                <div
+                  key={state.id}
+                  onClick={() => !isAnalyzing && setMainViewerUrl(state.previewUrl)}
+                  className={`relative flex-shrink-0 w-36 h-40 sm:w-40 sm:h-44 md:w-44 md:h-48 rounded-xl overflow-hidden cursor-pointer group border-2 ${
+                    mainViewerUrl === state.previewUrl
+                      ? 'border-indigo-500'
+                      : 'border-transparent hover:border-indigo-300'
+                  }`}
+                >
+                  <div className="relative w-full h-full overflow-visible">
+                    <img
+                      src={state.previewUrl}
+                      alt="preview"
+                      className="w-full h-full object-cover"
+                    />
 
-                        {state.result?.map((det, i) => (
-                        <div
-                            key={i}
-                            className="absolute border-2 border-yellow-400 rounded-sm"
-                            style={{
-                                left: `${det.boundingBox.x * 100}%`,
-                                top: `${det.boundingBox.y * 100}%`,
-                                width: `${det.boundingBox.width * 100}%`,
-                                height: `${det.boundingBox.height * 100}%`,
-                            }}
-                        >
-                            <div className="absolute top-0 left-0 bg-black bg-opacity-80 text-white text-[10px] px-1 rounded-sm shadow-sm font-semibold whitespace-nowrap">
-                                {det.ripeness} {Number((det.confidence * 100).toFixed(1))}%
-                            </div>
+                    {state.result?.map((det, i) => (
+                      <div
+                        key={i}
+                        className="absolute border-2 border-yellow-400 rounded-sm"
+                        style={{
+                          left: `${det.boundingBox.x * 100}%`,
+                          top: `${det.boundingBox.y * 100}%`,
+                          width: `${det.boundingBox.width * 100}%`,
+                          height: `${det.boundingBox.height * 100}%`,
+                        }}
+                      >
+                        <div className="absolute top-0 left-0 bg-black bg-opacity-80 text-white text-[10px] px-1 rounded-sm shadow-sm font-semibold whitespace-nowrap">
+                          {det.ripeness} {Number((det.confidence * 100).toFixed(1))}%
                         </div>
-                        ))}
+                      </div>
+                    ))}
+                  </div>
+
+                  {state.error && (
+                    <div className="absolute inset-0 bg-red-700/80 text-xs text-white font-bold flex items-center justify-center">
+                      {state.error}
                     </div>
+                  )}
 
-                    {state.error && (
-                        <div className="absolute inset-0 bg-red-700/80 text-xs text-white font-bold flex items-center justify-center">
-                        {state.error}
-                        </div>
-                    )}
-
-                    {state.avg_confidence !== undefined && (
-                        <div className="absolute bottom-1 left-2 right-2 text-white text-[10px] sm:text-xs font-bold flex justify-between items-center drop-shadow">
-                        <span className="text-emerald-300">정확도</span>
-                        <span>{(state.avg_confidence * 100).toFixed(0)}%</span>
-                        </div>
-                    )}
+                  {state.avg_confidence !== undefined && (
+                    <div className="absolute bottom-1 left-2 right-2 text-white text-[10px] sm:text-xs font-bold flex justify-between items-center drop-shadow">
+                      <span className="text-emerald-300">정확도</span>
+                      <span>{(state.avg_confidence * 100).toFixed(0)}%</span>
                     </div>
-                ))}
+                  )}
                 </div>
+              ))}
+            </div>
           </div>
         </div>
 
