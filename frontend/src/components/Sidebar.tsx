@@ -73,7 +73,7 @@ export default function Sidebar({ isOpen, toggleSidebar }: { isOpen: boolean; to
         <div className="flex items-center">
           <icons.User className="w-8 h-8 text-gray-500" />
           <div className="ml-3">
-            <p className="text-sm font-semibold text-gray-800">{user?.name}</p>
+            <p className="text-sm font-semibold text-gray-800">{user?.nickname}</p>
             <p className="text-xs text-gray-500">{user?.email}</p>
           </div>
         </div>

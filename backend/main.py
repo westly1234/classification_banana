@@ -234,8 +234,15 @@ app.add_middleware(
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
-# ⬇️ 유지: SQLAdmin 미리보기가 <video src="/results/..."> 를 쓰므로 public mount는 남겨둔다
-app.mount("/results", StaticFiles(directory=RESULTS_DIR), name="results")
+# ✅ StaticFiles 서브앱에 CORS를 직접 적용
+results_app = CORSMiddleware(
+    app=StaticFiles(directory=RESULTS_DIR),
+    allow_origins=[FRONT_URL, "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["GET", "HEAD", "OPTIONS"],
+    allow_headers=["*"],
+)
+app.mount("/results", results_app, name="results")
 
 # 작업 상태 임시 저장소
 tasks = {}
@@ -801,7 +808,7 @@ async def start_video_analysis(
     return {"task_id": task_id, "results": image_results}
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
-@analysis_router.get("/tasks/{task_id}/status")
+@task_router.get("/tasks/{task_id}/status")
 async def get_task_status(task_id: str):
     task = tasks.get(task_id)
     if not task:
