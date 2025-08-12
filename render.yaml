@@ -1,12 +1,10 @@
-# render.yaml  (repo root)
-
 services:
   # === Backend (FastAPI) ===
   - type: web
     name: classification-banana-backend
     env: python
     rootDir: backend
-    plan: free                 # 필요에 따라 starter/standard 등으로 변경
+    plan: free
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
@@ -16,11 +14,11 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.8
-    # 백엔드 변경에만 자동 배포 트리거 (선택)
+    # 백엔드 변경에만 자동 배포 트리거
     buildFilter:
       paths:
         included:
-          - backend/**
+          - "backend/**"
 
   # === Frontend (Vite static) ===
   - type: web
@@ -34,14 +32,13 @@ services:
     staticPublishPath: dist
     autoDeploy: true
     envVars:
-      # 프론트에서 백엔드 주소 사용: Render가 백엔드 URL을 주입해줌
       - key: VITE_API_BASE
         fromService:
           name: classification-banana-backend
           type: web
           property: url
-    # 프론트 변경에만 자동 배포 트리거 (선택)
+    # 프론트 변경에만 자동 배포 트리거
     buildFilter:
       paths:
         included:
-          - frontend/** 
+          - "frontend/**"
