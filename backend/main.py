@@ -129,7 +129,7 @@ class AnalysisAdmin(ModelView, model=Analysis):
     name_plural = "분석 기록"
     icon = "fa-solid fa-video"
     column_list = [Analysis.id, Analysis.username, Analysis.ripeness,
-                   Analysis.confidence, Analysis.created_at, "preview"]
+                Analysis.confidence, Analysis.created_at, "preview"]
 
     # 🔹 Admin 테이블에 썸네일 / 동영상 미리보기 칼럼
     async def preview(self, obj):
@@ -950,9 +950,6 @@ def generate_today_stats():
     finally:
         db.close()  
 
-@app.get("/ping")
-def ping():
-    return {"ok": True}
 
 # --- 최종 라우터 등록 ---
 app.include_router(auth_router) # @app.post('/login') 등을 여기에 포함시키려면 auth_router로 변경해야 함
