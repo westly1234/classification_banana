@@ -16,7 +16,7 @@ export default defineConfig({
   },
   optimizeDeps: {
     force: true,                 // Vite가 의존성 재번들 강제
-    include: ['react', 'react-dom'],
+    include: ['react', 'react-dom', 'react-player', 'react-dropzone', 'recharts'],
   },
   build: {
     commonjsOptions: { include: [/node_modules/] },
