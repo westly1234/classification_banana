@@ -538,12 +538,12 @@ def update_daily_analysis_stat(db: Session, target_date: date):
 # --- 📹 비동기 작업 및 동영상 생성 ---
 
 # ===== 리소스 제한 =====
-MAX_FILES = 5                 # 한 번에 최대 5장
-MAX_BYTES = 2 * 1024 * 1024   # 각 파일 최대 2MB
-TARGET_W, TARGET_H = 640, 480 # 작업 해상도
-VIDEO_FPS = 12                # 낮은 FPS
-SECONDS_PER_IMAGE = 1.5       # 이미지 당 체류 시간
-INFER_EVERY_N_FRAMES = 2      # 2프레임에 한 번만 YOLO 추론
+MAX_FILES = 5
+MAX_BYTES = 2 * 1024 * 1024
+TARGET_W, TARGET_H = 480, 360      # 🔁 640x480 → 480x360
+VIDEO_FPS = 8                      # 🔁 12 → 8
+SECONDS_PER_IMAGE = 1.2            # 🔁 1.5 → 1.2
+INFER_EVERY_N_FRAMES = 3           # 🔁 2 → 3  (3프레임마다 추론)
 
 def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int = TARGET_H) -> np.ndarray:
     """이미지를 안전하게 열고 (RGB) 640x480으로 리사이즈 + letterbox."""
@@ -746,66 +746,37 @@ async def start_video_analysis(
         raise HTTPException(status_code=413, detail=f"이미지는 최대 {MAX_FILES}장까지 업로드 가능합니다.")
 
     task_id = str(uuid.uuid4())
-    tasks[task_id] = {"status": "PENDING", "result": None}
+    tasks[task_id] = {"status": "PENDING", "result": None, "image_results": []}  # ← image_results 필드 유지
 
-    images_for_video, image_results = [], []
+    images_for_video = []
     for f in files[:MAX_FILES]:
         content = await f.read()
         if not content:
             continue
         if len(content) > MAX_BYTES:
-            image_results.append({
+            # 클라이언트가 파일별 에러를 알 수 있게 큐에 남겨도 됨
+            tasks[task_id]["image_results"].append({
                 "filename": f.filename, "detections": [], "avg_confidence": 0,
                 "error": f"파일 용량(최대 {MAX_BYTES//1024//1024}MB) 초과"
             })
             continue
-
-        # 분석용 리사이즈 이미지 한 벌 (가볍게)
         try:
             resized_bgr = safe_decode_and_resize(content, TARGET_W, TARGET_H)
-            images_for_video.append(resized_bgr)   # ✅ 이미 numpy(BGR)로 보관
+            images_for_video.append(resized_bgr)
         except Exception as e:
-            image_results.append({"filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)})
-            continue
-
-        # 즉시 1장 분석
-        try:
-            pil_image = Image.fromarray(cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB))
-            detections = run_yolo_model(pil_image)
-            avg_conf = sum(d["confidence"] for d in detections) / len(detections) if detections else 0
-            avg_fresh = sum(d["freshness"] for d in detections) / len(detections) if detections else 0
-
-            db = SessionLocal()
-            try:
-                db.add(Analysis(
-                    username=current_user.nickname,
-                    ripeness=detections[0]["ripeness"] if detections else "분석불가",
-                    confidence=avg_conf,
-                    freshness=avg_fresh,
-                    image_blob=None,  # 굳이 bytes 저장 안함 → DB 부하 감소
-                    created_at=datetime.now(KST)
-                ))
-                db.commit()
-            finally:
-                db.close()
-
-            image_results.append({
-                "filename": f.filename,
-                "detections": detections,
-                "avg_confidence": avg_conf
-            })
-        except Exception as e:
-            image_results.append({
+            tasks[task_id]["image_results"].append({
                 "filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)
             })
 
     if images_for_video:
-        thread = threading.Thread(target=create_analysis_video, args=(current_user, task_id, images_for_video))
-        thread.start()
+        threading.Thread(
+            target=create_analysis_video, args=(current_user, task_id, images_for_video), daemon=True
+        ).start()
     else:
-        tasks[task_id] = {"status": "FAILURE", "result": "유효한 이미지가 없습니다."}
+        tasks[task_id] = {"status": "FAILURE", "result": "유효한 이미지가 없습니다.", "image_results": []}
 
-    return {"task_id": task_id, "results": image_results}
+    # ✅ 즉시 200 응답 (무거운 일은 스레드에서)
+    return {"task_id": task_id, "results": tasks[task_id]["image_results"]}
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
 @task_router.get("/tasks/{task_id}/status")

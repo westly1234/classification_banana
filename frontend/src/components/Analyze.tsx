@@ -49,7 +49,7 @@ export default function Analyze() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
-  
+
   useEffect(() => {
     const savedStatesJSON = sessionStorage.getItem('analysisStates');
     const savedVideoUrl = sessionStorage.getItem('lastVideoUrl');
@@ -302,7 +302,7 @@ export default function Analyze() {
                 // ✅ react-player로 교체 (캐시 방지 쿼리 유지)
                 <div className="w-full h-full max-h-[500px]">
                   <ReactPlayer
-                    src={`${mainViewerUrl}?t=${Date.now()}`}
+                    url={`${mainViewerUrl}?t=${Date.now()}`}
                     controls
                     playing={false}
                     muted
