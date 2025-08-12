@@ -24,14 +24,6 @@ const API_BASE = import.meta.env.VITE_API_BASE;
 const MAX_FILES = 5;                 // 한 번에 최대 5장
 const MAX_SIZE = 2 * 1024 * 1024;    // 각 파일 최대 2MB
 
-const pollRef = useRef<number | null>(null);
-
-useEffect(() => {
-  return () => {
-    if (pollRef.current) clearInterval(pollRef.current);
-  };
-}, []);
-
 const fileToBase64 = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -50,7 +42,14 @@ export default function Analyze() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [taskStatus, setTaskStatus] = useState<string | null>(null);
   const [mainViewerUrl, setMainViewerUrl] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+  
   useEffect(() => {
     const savedStatesJSON = sessionStorage.getItem('analysisStates');
     const savedVideoUrl = sessionStorage.getItem('lastVideoUrl');
