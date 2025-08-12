@@ -1,4 +1,5 @@
 services:
+  # === Backend (FastAPI) ===
   - type: web
     name: classification-banana-backend
     env: python
@@ -13,7 +14,11 @@ services:
         value: 3.11.8
     buildFilter:
       paths:
-        included: ["backend/**"]
+        included:
+          - backend/**     # << 반드시 문자열 리스트
+        ignored: []         # 없어도 되지만 명시해두면 안전
+
+  # === Frontend (Vite static) ===
   - type: web
     name: classification-banana-frontend
     env: static
@@ -30,4 +35,6 @@ services:
           property: url
     buildFilter:
       paths:
-        included: ["frontend/**"]
+        included:
+          - frontend/**
+        ignored: []
