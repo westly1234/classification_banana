@@ -688,7 +688,7 @@ async def get_video(filename: str):
 
 # --- 📍 라우터 분리 ---
 auth_router = APIRouter(tags=["Authentication"])
-analysis_router = APIRouter(tags=["Analysis"], dependencies=[Depends(get_current_user)])
+analysis_router = APIRouter(tags=["Analysis"])
 task_router = APIRouter(tags=["Tasks"])
 stats_router = APIRouter(tags=["Statistics"])
 
