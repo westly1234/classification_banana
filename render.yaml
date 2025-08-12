@@ -19,7 +19,7 @@ services:
     envVars:
       - key: DATABASE_URL
         fromDatabase:
-          property: connectionString
+            property: connectionString
 
   # 2. 프론트엔드 서비스
   - type: web
@@ -35,6 +35,6 @@ services:
     envVars:
       - key: VITE_API_BASE
         fromService:
-          type: web
-          name: classification-banana-backend
-          property: url
+            type: web
+            name: classification-banana-backend
+            property: url
