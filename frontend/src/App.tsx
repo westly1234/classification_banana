@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import Sidebar from './components/Sidebar';
+//import Sidebar from './components/Sidebar';
 import AuthPage from './components/Auth';
 import Dashboard from './components/Dashboard';
 import Analyze from './components/Analyze';
@@ -33,7 +33,7 @@ const MainLayout: React.FC<{
 }> = ({ children, isSidebarOpen, toggleSidebar }) => (
   <div className="flex h-screen bg-brand-gray-100 relative">
     {/* ✅ Sidebar 먼저 렌더링 */}
-    <Sidebar isOpen={isSidebarOpen} toggleSidebar={toggleSidebar} />
+    {/* <Sidebar isOpen={isSidebarOpen} toggleSidebar={toggleSidebar} /> */}
 
     {/* ✅ 햄버거 버튼 (사이드바 열려있을 땐 숨김) */}
     {!isSidebarOpen && (
