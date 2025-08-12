@@ -1,14 +1,15 @@
 databases:
   - name: banana-database
     region: singapore
+    plan: free
 
 services:
-  # 1. 백엔드 서비스 (FastAPI)
+  # 1. 백엔드 서비스
   - type: web
     name: classification-banana-backend
     env: python
     region: singapore
-    plan: free
+    plan: free # 무료 플랜
     rootDir: backend
     buildCommand: |
       pip install --upgrade pip
@@ -18,10 +19,9 @@ services:
     envVars:
       - key: DATABASE_URL
         fromDatabase:
-          name: banana-database
-          property: internalConnectionString
+          property: connectionString
 
-  # 2. 프론트엔드 서비스 (Static Site)
+  # 2. 프론트엔드 서비스
   - type: web
     name: classification-banana-frontend
     env: static
