@@ -38,5 +38,6 @@ services:
     envVars:
       - key: VITE_API_BASE
         fromService:
+          type: web
           name: classification-banana-backend
           property: url
