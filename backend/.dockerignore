@@ -1,0 +1,23 @@
+# Git/IDE
+.git
+.gitignore
+.vscode
+__pycache__/
+*.pyc
+*.pyo
+
+# Node 프런트 쪽이 같은 레포에 있다면 제외
+node_modules/
+frontend/
+dist/
+build/
+
+# 런타임 아웃풋
+results/
+*.log
+*.sqlite*  # 원하면 제외 (Render 디스크 쓸 거면 포함 X)
+
+# 파이썬, 캐시
+.mypy_cache/
+.pytest_cache/
+.cache/

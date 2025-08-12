@@ -543,6 +543,7 @@ MAX_BYTES = 2 * 1024 * 1024
 TARGET_W, TARGET_H = 480, 384 
 VIDEO_FPS = 8                      # 🔁 12 → 8
 SECONDS_PER_IMAGE = 1.2
+INFER_EVERY_N_FRAMES = 4
 
 def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int = TARGET_H) -> np.ndarray:
     """이미지를 안전하게 열고 (RGB) 640x480으로 리사이즈 + letterbox."""
@@ -667,10 +668,11 @@ def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarra
         set_task("SUCCESS", result=f"/results/{final_video_path.name}")
         print(f"[{task_id}] ✅ 최종 비디오 생성 성공.")
     except Exception as e:
+        set_task("FAILURE", result=str(e))
+        print(f"[{task_id}] ❌ 비디오 생성 실패:", repr(e))
+    finally:
         if writer is not None:
             writer.release()
-        set_task("FAILURE", result=str(e))
-        print(f"[{task_id}] ❌ 비디오 생성 실패: {e}")
 
 # --- 동영상 스트리밍 함수 ---
 @app.get("/results/{filename}")
@@ -960,6 +962,9 @@ def generate_today_stats():
     finally:
         db.close()  
 
+@app.get("/ping")
+def ping():
+    return {"ok": True}
 
 # --- 최종 라우터 등록 ---
 app.include_router(auth_router) # @app.post('/login') 등을 여기에 포함시키려면 auth_router로 변경해야 함
