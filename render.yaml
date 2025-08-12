@@ -25,9 +25,10 @@ services:
           property: connectionString
 
   # 2. 프론트엔드 서비스 (Static Site)
-  - type: web
+  - type: web # 프론트엔드도 web 서비스의 한 종류입니다.
     name: classification-banana-frontend
     env: static
+    # region은 static site에 사용할 수 없으므로 삭제된 상태를 유지합니다.
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
@@ -37,6 +38,8 @@ services:
         destination: /index.html
     envVars:
       - key: VITE_API_BASE
+        # 'fromService' 블록의 올바른 구조입니다.
         fromService:
-          name: classification-banana-backend
-          property: url
+          type: web # ❗참조할 서비스의 타입을 'web'으로 명시해야 합니다.
+          name: classification-banana-backend # ❗참조할 서비스의 이름
+          property: url # ❗'web' 타입의 서비스에서 'url' 속성을 가져옵니다.
