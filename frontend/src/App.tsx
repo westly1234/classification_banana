@@ -1,41 +1,53 @@
-import React, { useState, useEffect } from 'react';
-import { HashRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+// src/App.tsx
+import React, { useState, useEffect, Suspense } from 'react';
+import { HashRouter, Routes, Route, Navigate, useLocation, Outlet } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-//import Sidebar from './components/Sidebar';
+import Sidebar from './components/Sidebar';
 import AuthPage from './components/Auth';
-import Dashboard from './components/Dashboard';
-import Analyze from './components/Analyze';
 
-// 보호된 라우트 (ProtectedRoute) 컴포넌트
-import { Outlet } from 'react-router-dom'; // Outlet을 import 합니다.
+// 🔹 문제 가능성이 있는 페이지는 지연 로딩
+const Analyze = React.lazy(() => import('./components/Analyze'));
+const Dashboard = React.lazy(() => import('./components/Dashboard'));
 
-const ProtectedRoute: React.FC = () => { // children prop은 더 이상 필요 없습니다.
-    const { user, loading } = useAuth(); // AuthContext에서 user와 loading 상태를 가져옵니다.
-    const location = useLocation();
-
-    // AuthProvider가 로컬 스토리지에서 사용자 정보를 로딩 중일 때를 대비
-    if (loading) {
-        return <div>로딩 중...</div>; // 또는 스피너 컴포넌트
+// 🔹 에러 바운더리로 어디서 터지는지 잡자
+class RouteErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: any }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error: any) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 16 }}>
+          <h2 style={{ fontWeight: 700, marginBottom: 8 }}>화면 로딩 중 오류</h2>
+          <pre style={{ whiteSpace: 'pre-wrap' }}>
+            {String(this.state.error?.message || this.state.error)}
+          </pre>
+        </div>
+      );
     }
+    return this.props.children;
+  }
+}
 
-    if (!user) { // 이제 user 객체 자체로 인증 여부를 판단합니다.
-        return <Navigate to="/auth" state={{ from: location }} replace />;
-    }
-
-    return <Outlet />; // 인증되었다면, 자식 라우트들을 <Outlet> 위치에 렌더링합니다.
+const ProtectedRoute: React.FC = () => {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+  if (loading) return <div>로딩 중...</div>;
+  if (!user) return <Navigate to="/auth" state={{ from: location }} replace />;
+  return <Outlet />;
 };
 
-// 메인 레이아웃 컴포넌트
 const MainLayout: React.FC<{
   children: React.ReactNode;
   isSidebarOpen: boolean;
   toggleSidebar: () => void;
 }> = ({ children, isSidebarOpen, toggleSidebar }) => (
   <div className="flex h-screen bg-brand-gray-100 relative">
-    {/* ✅ Sidebar 먼저 렌더링 */}
-    {/* <Sidebar isOpen={isSidebarOpen} toggleSidebar={toggleSidebar} /> */}
-
-    {/* ✅ 햄버거 버튼 (사이드바 열려있을 땐 숨김) */}
+    <Sidebar isOpen={isSidebarOpen} toggleSidebar={toggleSidebar} />
     {!isSidebarOpen && (
       <button
         className="md:hidden absolute top-4 left-4 z-50 text-2xl text-gray-800"
@@ -44,22 +56,14 @@ const MainLayout: React.FC<{
         ☰
       </button>
     )}
-
-    {/* ✅ 메인 콘텐츠 */}
-    <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
-      {children}
-    </main>
+    <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">{children}</main>
   </div>
 );
 
 export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-
-  useEffect(() => {
-    fetch(`${import.meta.env.VITE_API_BASE}/ping`).catch(() => {});
-  }, []);
-
-  const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
+  useEffect(() => { fetch(`${import.meta.env.VITE_API_BASE}/ping`).catch(() => {}); }, []);
+  const toggleSidebar = () => setIsSidebarOpen(prev => !prev);
 
   return (
     <AuthProvider>
@@ -73,7 +77,11 @@ export default function App() {
               path="/analyze"
               element={
                 <MainLayout isSidebarOpen={isSidebarOpen} toggleSidebar={toggleSidebar}>
-                  <Analyze />
+                  <RouteErrorBoundary>
+                    <Suspense fallback={<div>분석 화면 로딩 중...</div>}>
+                      <Analyze />
+                    </Suspense>
+                  </RouteErrorBoundary>
                 </MainLayout>
               }
             />
@@ -81,7 +89,11 @@ export default function App() {
               path="/dashboard"
               element={
                 <MainLayout isSidebarOpen={isSidebarOpen} toggleSidebar={toggleSidebar}>
-                  <Dashboard />
+                  <RouteErrorBoundary>
+                    <Suspense fallback={<div>대시보드 로딩 중...</div>}>
+                      <Dashboard />
+                    </Suspense>
+                  </RouteErrorBoundary>
                 </MainLayout>
               }
             />
