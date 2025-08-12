@@ -14,10 +14,9 @@ services:
         value: 3.11.8
     buildFilter:
       paths:
-        included:
-          - "backend/**"
-        ignored: []
-
+        - "backend/**"
+      ignoredPaths: []
+      
   # === Frontend (Vite static) ===
   - type: web
     name: classification-banana-frontend
@@ -34,7 +33,6 @@ services:
           type: web
           property: url
     buildFilter:
-      paths:
-        included:
-          - "frontend/**"
-        ignored: []
+      paths: 
+        - "frontend/**"
+      ignoredPaths: []
