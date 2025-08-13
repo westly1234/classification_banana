@@ -5,7 +5,7 @@ import Sidebar from './components/Sidebar';
 import AuthPage from './components/Auth';
 import Dashboard from './components/Dashboard';
 import Analyze from './components/Analyze';
-import api, { API_BASE } from './components/api'; 
+import api from './components/api'; 
 
 const ProtectedRoute: React.FC = () => { // children prop은 더 이상 필요 없습니다.
     const { user, loading } = useAuth(); // AuthContext에서 user와 loading 상태를 가져옵니다.
