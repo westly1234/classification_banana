@@ -225,8 +225,6 @@ class SimpleAuth(AuthenticationBackend):
             return False 
         
 # --- 🧠 FastAPI 앱 생성 ---
-# 프론트 주소(배포/로컬)
-FRONT_URL = "https://classification-banana-2.onrender.com"
 
 # (원하면 문서 숨김: docs_url=None, redoc_url=None)
 app = FastAPI(title="바나나 YOLO 분석")
@@ -235,10 +233,14 @@ admin = Admin(app, engine, authentication_backend=SimpleAuth(secret_key=SECRET_K
 admin.add_view(UserAdmin)
 admin.add_view(AnalysisAdmin)
 
-# ✅ CORS: 프론트 도메인만 허용
+# --- CORS 설정 ---
+FRONT_REGEX = r"^https://classification-banana(-[0-9]+)?\.onrender\.com$"
+LOCAL = "http://localhost:5173"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONT_URL, "http://localhost:5173"],
+    allow_origin_regex=FRONT_REGEX,   # ✅ 정규식
+    allow_origins=[LOCAL],            # 로컬은 정확히 지정
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -260,7 +262,8 @@ RESULTS_DIR.mkdir(exist_ok=True)
 # ✅ StaticFiles 서브앱에 CORS를 직접 적용
 results_app = CORSMiddleware(
     app=StaticFiles(directory=RESULTS_DIR),
-    allow_origins=[FRONT_URL, "http://localhost:5173"],
+    allow_origin_regex=FRONT_REGEX,   # ✅ 정규식
+    allow_origins=[LOCAL],
     allow_credentials=True,
     allow_methods=["GET", "HEAD", "OPTIONS"],
     allow_headers=["*"],
@@ -1001,11 +1004,12 @@ def get_settings():
         "SECONDS_PER_IMAGE": _float("SECONDS_PER_IMAGE", 1.0),
     }
 # --- 최종 라우터 등록 ---
-app.include_router(auth_router) # @app.post('/login') 등을 여기에 포함시키려면 auth_router로 변경해야 함
-app.include_router(analysis_router)
-app.include_router(task_router)
-app.include_router(stats_router)
-app.include_router(settings_router)
+app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
+app.include_router(analysis_router, prefix="/analysis")
+app.include_router(task_router,     prefix="/tasks")
+app.include_router(stats_router,    prefix="/stats")
+app.include_router(settings_router, prefix="/settings")
+
 # --- ✅ 루트 확인용 ---
 @app.get("/")
 def root():

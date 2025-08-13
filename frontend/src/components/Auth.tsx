@@ -1,9 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { API_BASE } from './api';
-import axios from 'axios';
-
+import api from './api'; 
 
 export default function AuthPage() {
     const [isLoginView, setIsLoginView] = useState(true);
@@ -26,34 +24,37 @@ export default function AuthPage() {
 
         try {
             if (isLoginView) {
-                const params = new URLSearchParams();
-                params.append('username', email);
-                params.append('password', password);
+            // 🔐 로그인 (x-www-form-urlencoded)
+            const params = new URLSearchParams();
+            params.append("username", email);
+            params.append("password", password);
 
-                const res = await axios.post(`${API_BASE}/login`, params);
+            const res = await api.post("/auth/login", params, {
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                timeout: 30000,
+            });
 
-                const token = res.data.access_token;
-                login(token);             // ✅ 토큰만 넘김
+            const token = res.data.access_token;
+                login(token);
                 navigate(from, { replace: true });
-
-                // 회원가입 로직은 JSON 형식이므로 그대로 둡니다.
-                // (main.py의 signup 함수가 Pydantic 모델 UserCreate를 사용하므로 JSON을 잘 처리합니다.)
-                if (password !== confirmPassword) {
-                    setError("비밀번호가 일치하지 않습니다.");
-                    setLoading(false);
-                    return;
-                }
-
-                await axios.post(`${API_BASE}/signup`, {
-                    nickname, // 백엔드 UserCreate 모델은 'username'이 아니라 'nickname'을 기대합니다. 이 부분도 확인이 필요합니다.
-                    email,
-                    password,
-                    password_confirm: confirmPassword
-                });
-
-                alert("이메일 인증 링크가 발송되었습니다. 메일을 확인해주세요.");
-                setIsLoginView(true);
+                return;
             }
+
+            // 📝 회원가입
+            if (password !== confirmPassword) {
+                setError("비밀번호가 일치하지 않습니다.");
+                return;
+            }
+
+            await api.post("/auth/signup", {
+                nickname,
+                email,
+                password,
+                password_confirm: confirmPassword,
+            });
+
+            alert("이메일 인증 링크가 발송되었습니다. 메일을 확인해주세요.");
+            setIsLoginView(true);
         } catch (err: any) {
             console.error("❌ 요청 실패:", err.response?.data || err);
             setError(err.response?.data?.detail || "요청 처리 중 오류가 발생했습니다.");

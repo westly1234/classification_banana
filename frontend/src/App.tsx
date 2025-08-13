@@ -5,9 +5,8 @@ import Sidebar from './components/Sidebar';
 import AuthPage from './components/Auth';
 import Dashboard from './components/Dashboard';
 import Analyze from './components/Analyze';
-
-// 보호된 라우트 (ProtectedRoute) 컴포넌트
-import { Outlet } from 'react-router-dom'; // Outlet을 import 합니다.
+import { API_BASE } from './components/api';
+import { Outlet } from 'react-router-dom'; 
 
 const ProtectedRoute: React.FC = () => { // children prop은 더 이상 필요 없습니다.
     const { user, loading } = useAuth(); // AuthContext에서 user와 loading 상태를 가져옵니다.
@@ -54,11 +53,11 @@ const MainLayout: React.FC<{
 
 export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-
+  
   useEffect(() => {
-    fetch(`${import.meta.env.VITE_API_BASE}/ping`).catch(() => {});
+    fetch(`${API_BASE}/ping`).catch(() => {});
   }, []);
-
+  
   const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
 
   return (

@@ -1,19 +1,19 @@
-// AuthContext.tsx 전체 코드
-
-import React, { createContext, useContext, useState, useEffect } from "react";
+// AuthContext.tsx
+import React, { createContext, useContext, useEffect, useState } from "react";
 
 type User = { email: string; nickname?: string } | null;
-type Ctx = {
-  user: User;
-  loading: boolean;
-  login: (token: string) => void;
-  logout: () => void;
-};
+type Ctx = { user: User; loading: boolean; login: (t: string) => void; logout: () => void };
 
 const AuthContext = createContext<Ctx | null>(null);
 
 function decode(token: string): { sub?: string; nickname?: string; exp?: number } | null {
-  try { return JSON.parse(atob(token.split(".")[1])); } catch { return null; }
+  try {
+    const b64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
 }
 function isExpired(exp?: number) {
   if (!exp) return true;
@@ -23,18 +23,26 @@ function isExpired(exp?: number) {
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User>(null);
   const [loading, setLoading] = useState(true);
-
+  
   const applyToken = (tok: string | null) => {
-    if (!tok) return setUser(null);
+    if (!tok) {
+      setUser(null);
+      return;
+    }
     const p = decode(tok);
-    if (!p || !p.sub || isExpired(p.exp)) return setUser(null);
+    if (!p || !p.sub || isExpired(p.exp)) {
+      localStorage.removeItem("access_token"); // 불량/만료 토큰 즉시 제거
+      setUser(null);
+      return;
+    }
     setUser({ email: p.sub, nickname: p.nickname });
   };
 
   useEffect(() => {
     applyToken(localStorage.getItem("access_token"));
     setLoading(false);
-    // 다른 탭에서 로그아웃/로그인 동기화
+
+    // 다른 탭과 동기화
     const onStorage = () => applyToken(localStorage.getItem("access_token"));
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);

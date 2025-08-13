@@ -135,7 +135,7 @@ export default function Analyze() {
     );
     try {
       const base64Image = await fileToBase64(targetState.file);
-      const res = await api.post<ImageAnalysisResultPayload>(`/analyze`, { image: base64Image }, { timeout: 60000 });
+      const res = await api.post<ImageAnalysisResultPayload>(`/analysis/analyze`, { image: base64Image }, { timeout: 60000 });
       const { detections, avg_confidence } = res.data;
       const formattedDetections = detections.map(d => ({ ...d, label: d.ripeness }));
       setAnalysisStates(prev =>
@@ -165,11 +165,7 @@ export default function Analyze() {
       try {
         const formData = new FormData();
         statesToAnalyze.forEach(s => formData.append('files', s.file));
-        const res = await api.post<{ task_id: string; results: ImageAnalysisResultPayload[] }>(
-          `/analyze_video`,
-          formData,
-          { timeout: 120000 }
-        );
+        const res = await api.post<{ task_id: string; results: ImageAnalysisResultPayload[] }>(`/analysis/analyze_video`, formData, { timeout: 120000 });
         const { task_id, results } = res.data;
         const resultsMap = new Map(results.map(r => [r.filename, r]));
         setAnalysisStates(prev =>
