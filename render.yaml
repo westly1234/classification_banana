@@ -33,8 +33,7 @@ services:
     routes:
       - type: rewrite
         source: /*
-        destination: /index.html
-    # 'url'은 지원 안 됨. host만 받을 수 있음.
+        destination: /index.htm
     envVars:
       - key: VITE_API_HOST
         fromService:
