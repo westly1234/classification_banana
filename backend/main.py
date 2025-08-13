@@ -41,8 +41,8 @@ from pydantic import BaseModel
 from ultralytics import YOLO
 
 # 로컬 DB 및 모델 초기화
-from db import SessionLocal, init_db
-from models import User, Analysis, DailyAnalysisStat, Base
+from db import engine, SessionLocal, init_db
+from models import User, Analysis, DailyAnalysisStat
 
 init_db()
 # --- 한국 시간 설정 ---
@@ -338,21 +338,6 @@ EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
 VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
 SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
-
-# 앱 시작 시 모델 워밍업 훅
-def warmup_model():
-    try:
-        if model:
-            dummy = np.zeros((MODEL_H, MODEL_W, 3), dtype=np.uint8)
-            with torch.no_grad():
-                _ = model(dummy, imgsz=(MODEL_W, MODEL_H), conf=0.25, verbose=False)
-            print("[startup] YOLO warmup done")
-    except Exception as e:
-        print("[startup] warmup skipped:", e)
-
-@app.on_event("startup")
-def _startup():
-    warmup_model()
 
 # --- YOLO 분석 함수 (여러 객체 지원) ---
 def letterbox_image(img, target_width, target_height):

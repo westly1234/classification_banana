@@ -1,20 +1,25 @@
-# backend/db.py
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from models import Base
+# db.py
 import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-# 절대 경로로 users.db 지정
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_PATH = os.path.join(BASE_DIR, "users.db")  # backend/users.db
-SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False, "timeout": 30})
+connect_args = {}
+# Render PG는 보통 SSL 필요
+if DATABASE_URL and "render.com" in DATABASE_URL:
+    connect_args["sslmode"] = "require"
 
-SessionLocal = sessionmaker(bind=engine)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
-# 테이블 생성
+# 모든 ORM 모델이 상속할 베이스
+Base = declarative_base()
+
 def init_db():
-    Base.metadata.create_all(bind=engine)
+    # 모델들을 등록하기 위해 지연 import (순환 방지)
+    import models  # noqa: F401
+    # Alembic을 쓰면 create_all은 보통 생략합니다.
+    # Base.metadata.create_all(bind=engine)

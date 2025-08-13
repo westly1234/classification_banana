@@ -25,6 +25,7 @@ results/
 *.webp
 *.npy
 *.pt
+!best.pt
 
 # 빌드 산출물
 dist/

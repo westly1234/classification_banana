@@ -25,6 +25,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # 2) 앱 소스 마지막에 복사 (이 레이어만 자주 invalid)
 COPY . /app/
 
+# YOLOv8 모델 파일 복사
+COPY best.pt /app/best.pt
+
 # 런타임 준비
 RUN mkdir -p /app/results
 

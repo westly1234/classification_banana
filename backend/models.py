@@ -2,7 +2,7 @@
 
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, LargeBinary, Date
 from sqlalchemy.sql import func
-from models import Base 
+from db import Base 
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 import pytz
