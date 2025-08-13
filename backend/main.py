@@ -85,35 +85,6 @@ else:
     engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) 
 
-Base = declarative_base()
-
-# --- 👤 사용자 모델 ---
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    nickname = Column(String, unique=True, index=True)
-    email = Column(String, unique=True, index=True)
-    password_hash = Column(String)
-    is_verified = Column(Integer, default=0)  # 0 = 미인증, 1 = 인증완료
-    is_superuser = Column(Boolean, default=False)
-
-# --- 🍌 분석 결과 저장 모델 ---
-class Analysis(Base):
-    __tablename__ = "analysis"
-
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String)
-    ripeness = Column(String)
-    freshness = Column(Float, nullable=True)
-    confidence = Column(Float)
-    image_path = Column(String, nullable=True)
-    video_path = Column(String, nullable=True)
-    image_blob = Column(LargeBinary, nullable=True)
-    video_blob = Column(LargeBinary, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone("Asia/Seoul")))
-
-Base.metadata.create_all(bind=engine)
-
 # --- 📦 Pydantic 모델 ---
 class UserCreate(BaseModel):
     nickname: str
@@ -797,7 +768,7 @@ async def start_video_analysis(
     return {"task_id": task_id, "results": tasks[task_id]["image_results"]}
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
-@task_router.get("/tasks/{task_id}/status")
+@task_router.get("/{task_id}/status")
 async def get_task_status(task_id: str):
     task = tasks.get(task_id)
     if not task:
@@ -810,7 +781,7 @@ async def get_task_status(task_id: str):
     }
 
 # --- 통계 라우터 ---
-@stats_router.get("/stats", response_model=dict)
+@stats_router.get("/", response_model=dict)
 def get_stats(db: Session = Depends(get_db)):
     today = datetime.now(KST).date()
 
@@ -849,7 +820,7 @@ def get_stats(db: Session = Depends(get_db)):
         "ripeness_counts": ripeness_counts
     }
 
-@stats_router.get("/stats/daily")
+@stats_router.get("/daily")
 def get_daily_stats(db: Session = Depends(get_db)):
     today = datetime.now(KST).date()
     update_daily_analysis_stat(db, today)  # 오늘만 업데이트
@@ -901,7 +872,7 @@ def get_analysis_stats_by_date(db: Session, target_date: date):
 
     return count, avg_conf, avg_fresh, ripeness_counts
 
-@stats_router.get("/stats/summary")
+@stats_router.get("/summary")
 def get_summary_stats():
     db = SessionLocal()
     try:
@@ -991,7 +962,7 @@ settings_router = APIRouter(tags=["Settings"])
 def _int(name, default): return int(os.getenv(name, str(default)))
 def _float(name, default): return float(os.getenv(name, str(default)))
 
-@settings_router.get("/settings")
+@settings_router.get("/")
 def get_settings():
     return {
         "MODEL_W": _int("MODEL_W", 640),
@@ -1003,11 +974,12 @@ def get_settings():
         "SECONDS_PER_IMAGE": _float("SECONDS_PER_IMAGE", 1.0),
     }
 # --- 최종 라우터 등록 ---
-app.include_router(auth_router)              
-app.include_router(analysis_router)           
-app.include_router(task_router, prefix="/tasks")
-app.include_router(stats_router, prefix="/stats")
-app.include_router(settings_router, prefix="/settings")
+app.include_router(auth_router,      prefix="/auth")
+app.include_router(analysis_router,  prefix="/analysis") 
+app.include_router(task_router,      prefix="/tasks")
+app.include_router(stats_router,     prefix="/stats")
+app.include_router(settings_router,  prefix="/settings")
+
 # --- ✅ 루트 확인용 ---
 @app.get("/")
 def root():
