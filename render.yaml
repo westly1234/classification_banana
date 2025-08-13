@@ -11,7 +11,7 @@ services:
     region: singapore
     plan: free
     rootDir: backend
-    dockerfilePath: backend/Dockerfile
+    dockerfilePath: Dockerfile
     healthCheckPath: /ping
     envVars:
       - key: DATABASE_URL
@@ -33,7 +33,7 @@ services:
     routes:
       - type: rewrite
         source: /*
-        destination: /index.htm
+        destination: /index.html
     envVars:
       - key: VITE_API_HOST
         fromService:
