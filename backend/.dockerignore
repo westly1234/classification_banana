@@ -15,9 +15,8 @@ __pycache__/
 # Node / Front
 node_modules/
 frontend/
-*.log
 
-# 런타임 산출물
+# 런타임 산출물/큰 파일
 results/
 *.mp4
 *.jpg
@@ -25,7 +24,8 @@ results/
 *.png
 *.webp
 *.npy
+*.pt
 
-# 기타 큰 파일/캐시
+# 빌드 산출물
 dist/
 build/
