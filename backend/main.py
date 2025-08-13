@@ -181,7 +181,7 @@ admin.add_view(UserAdmin)
 admin.add_view(AnalysisAdmin)
 
 # --- CORS 설정 ---
-FRONT_REGEX = r"^https://classification-banana(-[0-9]+)?\.onrender\.com$"
+FRONT_REGEX = r"^https://classification-banana.*\.onrender\.com$"
 LOCAL = "http://localhost:5173"
 
 app.add_middleware(
@@ -194,12 +194,13 @@ app.add_middleware(
 )
 
 # ✅ 세션 쿠키 보안 옵션 (SQLAdmin용)
+https_only = os.getenv("ENV", "prod") == "prod"
 app.add_middleware(
     SessionMiddleware,
     secret_key=SECRET_KEY,
-    https_only=True,
+    https_only=https_only,
     same_site="lax",
-    max_age=60 * 60 * 8,  # 8시간
+    max_age=60 * 60 * 8,
 )
 
 # ✅ 결과 폴더

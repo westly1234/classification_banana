@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { HashRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { HashRouter, Routes, Route, Navigate, useLocation, Outlet } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import Sidebar from './components/Sidebar';
 import AuthPage from './components/Auth';
 import Dashboard from './components/Dashboard';
 import Analyze from './components/Analyze';
-import { API_BASE } from './components/api';
-import { Outlet } from 'react-router-dom'; 
+import api, { API_BASE } from './components/api'; 
 
 const ProtectedRoute: React.FC = () => { // children prop은 더 이상 필요 없습니다.
     const { user, loading } = useAuth(); // AuthContext에서 user와 loading 상태를 가져옵니다.
@@ -55,7 +54,7 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
   useEffect(() => {
-    fetch(`${API_BASE}/ping`).catch(() => {});
+    api.get('/ping').catch(() => {});
   }, []);
   
   const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);

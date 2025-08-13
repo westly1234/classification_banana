@@ -9,33 +9,32 @@ function resolveApiBase() {
   // ① Render가 주입하는 호스트 우선
   const rawHost = import.meta.env.VITE_API_HOST?.trim();
   if (rawHost) {
-    // host에 이미 프로토콜이 있으면 그대로, 없으면 https:// 붙임
+    // host에 프로토콜이 있으면 그대로, 없으면 https 추가
     const url = rawHost.startsWith("http://") || rawHost.startsWith("https://")
       ? rawHost
       : `https://${rawHost}`;
     return stripTrailingSlash(url);
   }
 
-  // ② 로컬 개발일 때만 VITE_API_BASE 사용
+  // ② 개발 모드일 때만 로컬 fallback 허용
   if (import.meta.env.DEV) {
-    const legacy = import.meta.env.VITE_API_BASE?.trim();
-    if (legacy) return stripTrailingSlash(legacy);
+    const base = import.meta.env.VITE_API_BASE?.trim();
+    if (base) return stripTrailingSlash(base);
     return "http://localhost:8000";
   }
 
-  // ③ 프로덕션인데 값이 없으면 명확히 실패(디버깅 편의)
+  // ③ 프로덕션이면 반드시 설정되어야 함 (localhost 강제 금지)
   throw new Error("API host is not configured in production build.");
 }
 
 export const API_BASE = resolveApiBase();
-if (import.meta.env.DEV) console.info("[API_BASE]", API_BASE);
+console.info("[API_BASE]", API_BASE); // ← 프로덕션에서도 한번 찍어서 확인
 
 const api = axios.create({
   baseURL: API_BASE,
   timeout: 30000,
 });
 
-// --- 인터셉터 동일 ---
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("access_token");
   if (token) {
