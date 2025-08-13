@@ -1,34 +1,24 @@
 // src/components/api.ts
 import axios from "axios";
 
-function stripTrailingSlash(s: string) {
-  return s.replace(/\/+$/, "");
-}
-
 function resolveApiBase() {
-  // ① Render가 주입하는 호스트 우선
-  const rawHost = import.meta.env.VITE_API_HOST?.trim();
-  if (rawHost) {
-    // host에 프로토콜이 있으면 그대로, 없으면 https 추가
-    const url = rawHost.startsWith("http://") || rawHost.startsWith("https://")
-      ? rawHost
-      : `https://${rawHost}`;
-    return stripTrailingSlash(url);
-  }
+  // ① 항상 최우선: 절대 URL을 직접 넣었을 때(프로덕션/개발 공통 허용)
+  const explicit = import.meta.env.VITE_API_BASE?.trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
 
-  // ② 개발 모드일 때만 로컬 fallback 허용
-  if (import.meta.env.DEV) {
-    const base = import.meta.env.VITE_API_BASE?.trim();
-    if (base) return stripTrailingSlash(base);
-    return "http://localhost:8000";
-  }
+  // ② Render가 주입하는 백엔드 호스트
+  const host = import.meta.env.VITE_API_HOST?.trim();
+  if (host) return `https://${host}`;
 
-  // ③ 프로덕션이면 반드시 설정되어야 함 (localhost 강제 금지)
+  // ③ 로컬 개발 기본값
+  if (import.meta.env.DEV) return "http://localhost:8000";
+
+  // ④ 마지막 안전장치(프로덕션에서 변수 없으면 여기까지 도달)
   throw new Error("API host is not configured in production build.");
 }
 
 export const API_BASE = resolveApiBase();
-console.info("[API_BASE]", API_BASE); // ← 프로덕션에서도 한번 찍어서 확인
+if (import.meta.env.DEV) console.info("[API_BASE]", API_BASE);
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -50,13 +40,11 @@ api.interceptors.response.use(
     const cfg: any = err.config || {};
     const status = err.response?.status;
 
-    // 콜드스타트/네트워크 오류 1회 재시도
     if ((!err.response || status === 502) && !cfg.__retry) {
       cfg.__retry = true;
       await new Promise((r) => setTimeout(r, 1500));
       return api.request(cfg);
     }
-
     if (status === 401) {
       localStorage.removeItem("access_token");
       alert("세션이 만료되었습니다. 다시 로그인해주세요.");
