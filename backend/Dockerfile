@@ -3,35 +3,31 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=off \
-    PIP_DEFAULT_TIMEOUT=100
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10 \
+    # 벨트+멜빵: requirements에도 있지만 환경변수로도 CPU 인덱스 지정
+    PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu \
+    # Ultralytics 경고 제거 (루트 홈 쓰기 불가하니 /tmp 사용)
+    YOLO_CONFIG_DIR=/tmp/Ultralytics
 
 WORKDIR /app
 
-# OS 패키지 (자주 안 바뀌는 레이어)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg libgl1 libglib2.0-0 ca-certificates fonts-nanum \
  && rm -rf /var/lib/apt/lists/*
 
-# 1) requirements만 먼저 복사 → pip install (레이어 캐시 유지)
-# rootDir=backend 이므로 컨텍스트 루트에 requirements.txt가 바로 존재함
+# 1) requirements만 우선 복사 후 설치 (캐시 재사용)
 COPY requirements.txt /tmp/requirements.txt
-
-# BuildKit pip 캐시 (설치 속도↑, 재빌드 시 캐시 재사용)
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip setuptools wheel && \
     pip install --prefer-binary -r /tmp/requirements.txt
 
-# 2) 앱 소스 마지막에 복사 (이 레이어만 자주 invalid)
+# 2) 앱 소스 복사 (+ best.pt 는 .dockerignore에서 허용됨)
 COPY . /app/
 
-# YOLOv8 모델 파일 복사
-COPY best.pt /app/best.pt
-
-# 런타임 준비
+# 결과 폴더 준비
 RUN mkdir -p /app/results
 
-# Render는 동적으로 PORT를 주입하므로 반드시 $PORT를 따르도록
-# (로컬에선 10000으로 기본값)
+# Render 동적 포트 사용
 ENV PORT=10000
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --proxy-headers --workers 1"]
