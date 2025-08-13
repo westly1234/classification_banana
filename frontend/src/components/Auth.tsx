@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import api from './api'; 
+import api from "./api";
 
 export default function AuthPage() {
   const [isLoginView, setIsLoginView] = useState(true);
@@ -29,11 +29,8 @@ export default function AuthPage() {
         params.append("username", email);
         params.append("password", password);
 
-        const res = await api.post(
-          "/auth/login",
-          params,
-          { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-        );
+        const res = await api.post("/auth/login", params);
+        await api.post("/auth/signup", { nickname, email, password, password_confirm: confirmPassword });
 
         const token = res.data.access_token;
         login(token);
