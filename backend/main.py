@@ -259,16 +259,12 @@ app.add_middleware(
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
-# ✅ StaticFiles 서브앱에 CORS를 직접 적용
-results_app = CORSMiddleware(
-    app=StaticFiles(directory=RESULTS_DIR),
-    allow_origin_regex=FRONT_REGEX,   # ✅ 정규식
-    allow_origins=[LOCAL],
-    allow_credentials=True,
-    allow_methods=["GET", "HEAD", "OPTIONS"],
-    allow_headers=["*"],
-)
-app.mount("/results", results_app, name="results")
+# --- 라우터 생성 ---
+auth_router = APIRouter(tags=["Authentication"])
+analysis_router = APIRouter(tags=["Analysis"])
+task_router = APIRouter(tags=["Tasks"])
+stats_router = APIRouter(tags=["Statistics"])
+settings_router = APIRouter(tags=["Settings"])
 
 # 작업 상태 임시 저장소
 tasks = {}
@@ -429,7 +425,7 @@ async def get_current_user(Authorization: str = Header(None), db: Session = Depe
     return user
 
 # --- 📝 회원가입 ---
-@app.post("/signup")
+@auth_router.post("/signup")
 def signup(user: UserCreate, db: Session = Depends(get_db)):
     # 이메일 중복 체크
     if db.query(User).filter(User.email == user.email).first():
@@ -481,7 +477,7 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
 
     return {"message": "이메일 인증 메일이 발송되었습니다."}
 
-@app.get("/verify/{token}")
+@auth_router.get("/verify/{token}")
 def verify_email(token: str, db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -496,7 +492,7 @@ def verify_email(token: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="잘못된 또는 만료된 토큰입니다.")
 
 # --- 🔐 로그인 ---
-@app.post("/login", response_model=Token)
+@auth_router.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == form_data.username).first()
     if not user:
@@ -702,20 +698,23 @@ def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarra
 
 # --- 동영상 스트리밍 함수 ---
 @app.get("/results/{filename}")
-async def get_video(filename: str):
-    file_path = RESULTS_DIR / filename
-    if not file_path.exists():
+def get_result_file(filename: str):
+    root = RESULTS_DIR.resolve()
+    candidate = (root / filename).resolve()
+
+    # 🔒 /results 디렉터리 밖 접근 방지
+    try:
+        candidate.relative_to(root)
+    except ValueError:
         raise HTTPException(status_code=404, detail="File not found")
+
+    if not candidate.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
     return FileResponse(
-        file_path,
+        candidate,
         headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
     )
-
-# --- 📍 라우터 분리 ---
-auth_router = APIRouter(tags=["Authentication"])
-analysis_router = APIRouter(tags=["Analysis"])
-task_router = APIRouter(tags=["Tasks"])
-stats_router = APIRouter(tags=["Statistics"])
 
 # --- 분석 라우터 (모든 API에 인증 필요) ---
 @analysis_router.post("/analyze")
@@ -1004,12 +1003,11 @@ def get_settings():
         "SECONDS_PER_IMAGE": _float("SECONDS_PER_IMAGE", 1.0),
     }
 # --- 최종 라우터 등록 ---
-app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
-app.include_router(analysis_router, prefix="/analysis")
-app.include_router(task_router,     prefix="/tasks")
-app.include_router(stats_router,    prefix="/stats")
+app.include_router(auth_router)              
+app.include_router(analysis_router)           
+app.include_router(task_router, prefix="/tasks")
+app.include_router(stats_router, prefix="/stats")
 app.include_router(settings_router, prefix="/settings")
-
 # --- ✅ 루트 확인용 ---
 @app.get("/")
 def root():
