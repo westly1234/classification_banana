@@ -17,7 +17,7 @@ services:
       - key: DATABASE_URL
         fromDatabase:
           name: banana-database
-          property: internalConnectionString
+          property: connectionString
     buildFilter:
       paths: [ "backend/**" ]
 
