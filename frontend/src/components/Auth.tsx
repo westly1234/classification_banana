@@ -30,7 +30,7 @@ export default function AuthPage() {
         params.append("password", password);
 
         const res = await api.post("/auth/login", params);
-        await api.post("/auth/signup", { nickname, email, password, password_confirm: confirmPassword });
+        await api.post("/auth/login", { nickname, email, password, password_confirm: confirmPassword });
 
         const token = res.data.access_token;
         login(token);
