@@ -1,11 +1,15 @@
 # --- 📁 backend/main.py ---
 
-import os, base64, io, uuid, threading, time, smtplib, pytz, cv2, torch, numpy as np
+import os, asyncio, concurrent.futures, base64, io, uuid, threading, time, smtplib, pytz, cv2, torch, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
 from markupsafe import Markup
-from PIL import Image, ImageFont, ImageDraw
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True # 손상/부분 이미지도 최대한 로드
+from dotenv import load_dotenv
+load_dotenv()
+
 from collections import Counter
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -38,7 +42,7 @@ from ultralytics import YOLO
 
 # 로컬 DB 및 모델 초기화
 from db import SessionLocal, init_db
-from models import User, Analysis, DailyAnalysisStat
+from models import User, Analysis, DailyAnalysisStat, Base
 
 init_db()
 # --- 한국 시간 설정 ---
@@ -65,14 +69,22 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL and DATABASE_URL.startswith("postgres"):
     # Render의 PostgreSQL URL 형식에 맞게 드라이버 이름을 변경합니다.
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=5, max_overflow=5,
+        pool_recycle=180,     # ✅ 3분마다 커넥션 재활용
+        pool_timeout=30,
+        connect_args={"sslmode":"require"}  # URL에 ?sslmode=require가 있으면 생략 가능
+    )
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 else:
     # 로컬 개발 환경용 SQLite 설정
     print("⚠️  DATABASE_URL 환경 변수를 찾을 수 없습니다. 로컬 SQLite DB를 사용합니다.")
     SQLALCHEMY_DATABASE_URL = "sqlite:///./users.db"
     engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) 
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- 👤 사용자 모델 ---
@@ -305,6 +317,43 @@ FRESHNESS_MAP = {
     "rotten": 0.0,
 }
 
+# YOLO/CPU 튜닝: 무료 1코어 환경 고려
+cv2.setNumThreads(1)
+torch.set_num_threads(max(1, (os.cpu_count() or 1) // 2))
+
+# 해상도 일관화(모델/전처리/비디오 공통)
+MODEL_W = int(os.getenv("MODEL_W", "640"))
+MODEL_H = int(os.getenv("MODEL_H", "480"))
+TARGET_W = int(os.getenv("TARGET_W", str(MODEL_W)))  # 비디오/표시 해상도
+TARGET_H = int(os.getenv("TARGET_H", str(MODEL_H)))
+
+# 업로드 제한(환경변수로 크게 조정 가능)
+MAX_FILES = int(os.getenv("MAX_FILES", "20"))                 # 프론트는 제한 제거(아래 4번), 서버는 안전빵
+MAX_BYTES = int(os.getenv("MAX_BYTES", str(10*1024*1024)))    # 10MB/파일
+
+# 추론 전용 스레드풀(ADD)
+EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+#  비디오 생성(멀티 이미지) 최적화 + 해상도 키우기
+INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
+VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
+SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
+
+# 앱 시작 시 모델 워밍업 훅
+def warmup_model():
+    try:
+        if model:
+            dummy = np.zeros((MODEL_H, MODEL_W, 3), dtype=np.uint8)
+            with torch.no_grad():
+                _ = model(dummy, imgsz=(MODEL_W, MODEL_H), conf=0.25, verbose=False)
+            print("[startup] YOLO warmup done")
+    except Exception as e:
+        print("[startup] warmup skipped:", e)
+
+@app.on_event("startup")
+def _startup():
+    warmup_model()
+
 # --- YOLO 분석 함수 (여러 객체 지원) ---
 def letterbox_image(img, target_width, target_height):
     h, w = img.shape[:2]
@@ -317,18 +366,12 @@ def letterbox_image(img, target_width, target_height):
     new_img[top:top+nh, left:left+nw] = resized
     return new_img
 
-def run_yolo_model(image: Image.Image):
+def run_yolo_np_bgr(img_bgr: np.ndarray):
     if not model:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="모델을 사용할 수 없습니다.")
-    
-    image = image.convert("RGB")
-    img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-    # ✅ Letterbox 적용 (YOLO 학습 해상도 기준)
-    img_resized = letterbox_image(img_cv, 640, 480)
-
-    # ✅ 모델 추론
-    results = model(img_resized, imgsz=(640, 480), conf=0.1, verbose=False)[0]
+    # img_bgr는 이미 (MODEL_H, MODEL_W) 레터박스 상태라고 가정
+    results = model(img_bgr, imgsz=(MODEL_W, MODEL_H), conf=0.1, verbose=False)[0]
 
     analysis_results = []
     VALID_CLASSES = {"ripe", "unripe", "freshripe", "freshunripe", "overripe", "rotten"}
@@ -338,35 +381,25 @@ def run_yolo_model(image: Image.Image):
         for box in results.boxes:
             cls_idx = int(box.cls.item())
             cls_name = model.names[cls_idx]
-
-            # ✅ 바나나 관련 클래스만 필터링
             if cls_name not in VALID_CLASSES:
                 continue
 
             valid_detected = True
             conf = float(box.conf.item())
-            freshness = FRESHNESS_MAP.get(cls_name, 0.0)
             x1, y1, x2, y2 = box.xyxy[0]
-
             bbox = {
-                "x": round(x1.item() / 640, 4),
-                "y": round(y1.item() / 480, 4),
-                "width": round((x2 - x1).item() / 640, 4),
-                "height": round((y2 - y1).item() / 480, 4),
+                "x": round(x1.item() / MODEL_W, 4),
+                "y": round(y1.item() / MODEL_H, 4),
+                "width": round((x2 - x1).item() / MODEL_W, 4),
+                "height": round((y2 - y1).item() / MODEL_H, 4),
             }
-
             analysis_results.append({
                 "ripeness": KOREAN_CLASSES.get(cls_name, cls_name),
                 "confidence": round(conf, 3),
-                "freshness": round(freshness, 3),
+                "freshness": round(FRESHNESS_MAP.get(cls_name, 0.0), 3),
                 "boundingBox": bbox
             })
-
-    # ✅ 바나나 클래스가 하나도 없으면 빈 리스트 반환
-    if not valid_detected:
-        return []
-
-    return analysis_results
+    return analysis_results if valid_detected else []
 
 # --- 🔑 인증 의존성 ---
 async def get_current_user(Authorization: str = Header(None), db: Session = Depends(get_db)):
@@ -548,19 +581,13 @@ def update_daily_analysis_stat(db: Session, target_date: date):
 
 # --- 📹 비동기 작업 및 동영상 생성 ---
 
-# ===== 리소스 제한 =====
-MAX_FILES = 5
-MAX_BYTES = 2 * 1024 * 1024
-TARGET_W, TARGET_H = 480, 384 
-VIDEO_FPS = 8                      # 🔁 12 → 8
-SECONDS_PER_IMAGE = 1.2
-INFER_EVERY_N_FRAMES = 4
-
 def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int = TARGET_H) -> np.ndarray:
-    """이미지를 안전하게 열고 (RGB) 640x480으로 리사이즈 + letterbox."""
-    pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    arr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)    
-    return letterbox_image(arr, dst_w, dst_h)
+    """빠른 디코딩 + 레터박스 (BGR 반환)"""
+    arr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR
+    if img is None:
+        raise ValueError("이미지 디코딩 실패")
+    return letterbox_image(img, dst_w, dst_h)  # BGR
 
 def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarray]):
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
@@ -704,46 +731,40 @@ stats_router = APIRouter(tags=["Statistics"])
 
 # --- 분석 라우터 (모든 API에 인증 필요) ---
 @analysis_router.post("/analyze")
-def analyze_single_image(payload: ImagePayload, current_user: User = Depends(get_current_user)):
+async def analyze_single_image(payload: ImagePayload, current_user: User = Depends(get_current_user)):
     if not model:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="모델이 현재 사용할 수 없습니다.")
+        raise HTTPException(status_code=503, detail="모델이 현재 사용할 수 없습니다.")
     try:
-        image_data = base64.b64decode(payload.image)
-        resized_bgr = safe_decode_and_resize(image_data, TARGET_W, TARGET_H)
-        image = Image.fromarray(cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB))
-        detections = run_yolo_model(image)
+        img_bytes = base64.b64decode(payload.image)
+        # 1) 빠른 디코드 + 레터박스(동기 OK)
+        img_bgr = safe_decode_and_resize(img_bytes, MODEL_W, MODEL_H)
 
-        # ✅ 평균 신뢰도 계산
-        avg_conf = sum([d["confidence"] for d in detections]) / len(detections) if detections else 0
-        avg_fresh = sum([d["freshness"] for d in detections]) / len(detections) if detections else 0
+        # 2) 추론만 스레드풀로
+        loop = asyncio.get_running_loop()
+        detections = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, img_bgr)
 
+        avg_conf = round((sum(d["confidence"] for d in detections) / len(detections)) if detections else 0.0, 4)
+        avg_fresh = round((sum(d["freshness"] for d in detections) / len(detections)) if detections else 0.0, 4)
+
+        # DB 저장(동일)
         db = SessionLocal()
         try:
             db.add(Analysis(
                 username=current_user.nickname,
                 ripeness=detections[0]["ripeness"] if detections else "분석불가",
-                confidence=avg_conf,
-                freshness=avg_fresh, 
-                image_blob=image_data,
-                created_at=datetime.now(KST)
+                confidence=avg_conf, freshness=avg_fresh,
+                image_blob=img_bytes, created_at=datetime.now(KST)
             ))
             db.commit()
-            today = datetime.now(KST).date()
-            update_daily_analysis_stat(db, today)
+            update_daily_analysis_stat(db, datetime.now(KST).date())
         finally:
             db.close()
 
-        if len(detections) > 0:
-            avg_conf = sum([d["confidence"] for d in detections]) / len(detections)
-
-        return {
-            "detections": detections,
-            "avg_confidence": round(avg_conf, 4)  # 백엔드에서 미리 계산
-        }
+        return {"detections": detections, "avg_confidence": avg_conf}
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"이미지 분석 중 오류 발생: {e}")
+        raise HTTPException(status_code=500, detail=f"이미지 분석 중 오류: {e}")
 
 @analysis_router.post("/analyze_video")
 async def start_video_analysis(
@@ -977,12 +998,29 @@ def generate_today_stats():
 def ping():
     return {"ok": True}
 
+# 서버 제한값을 환경변수화 + 프론트에 자동 전파
+settings_router = APIRouter(tags=["Settings"])
+
+def _int(name, default): return int(os.getenv(name, str(default)))
+def _float(name, default): return float(os.getenv(name, str(default)))
+
+@settings_router.get("/settings")
+def get_settings():
+    return {
+        "MODEL_W": _int("MODEL_W", 640),
+        "MODEL_H": _int("MODEL_H", 480),
+        "MAX_FILES": _int("MAX_FILES", 20),          # 0이면 무제한으로 해석
+        "MAX_BYTES": _int("MAX_BYTES", 10*1024*1024),# 0이면 무제한
+        "VIDEO_FPS": _int("VIDEO_FPS", 8),
+        "INFER_EVERY_N_FRAMES": _int("INFER_EVERY_N_FRAMES", 10),
+        "SECONDS_PER_IMAGE": _float("SECONDS_PER_IMAGE", 1.0),
+    }
 # --- 최종 라우터 등록 ---
 app.include_router(auth_router) # @app.post('/login') 등을 여기에 포함시키려면 auth_router로 변경해야 함
 app.include_router(analysis_router)
 app.include_router(task_router)
 app.include_router(stats_router)
-
+app.include_router(settings_router)
 # --- ✅ 루트 확인용 ---
 @app.get("/")
 def root():

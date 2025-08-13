@@ -1,4 +1,3 @@
-
 import type { YoloAnalysisResult } from '../types';
 import { API_BASE } from '../components/api';
 

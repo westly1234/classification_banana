@@ -1,23 +1,31 @@
-# Git/IDE
+# VCS / OS
 .git
 .gitignore
-.vscode
+.DS_Store
+
+# Python
+venv
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
 
-# Node 프런트 쪽이 같은 레포에 있다면 제외
+# Node / Front
 node_modules/
 frontend/
+*.log
+
+# 런타임 산출물
+results/
+*.mp4
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.npy
+
+# 기타 큰 파일/캐시
 dist/
 build/
-
-# 런타임 아웃풋
-results/
-*.log
-*.sqlite*  # 원하면 제외 (Render 디스크 쓸 거면 포함 X)
-
-# 파이썬, 캐시
-.mypy_cache/
-.pytest_cache/
-.cache/

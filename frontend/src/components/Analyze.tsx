@@ -17,10 +17,10 @@ interface AnalysisState {
   isSelected: boolean;
   avg_confidence?: number;
 }
-type StorableAnalysisState = Omit<AnalysisState, 'file'> & { fileName: string; fileType: string };
-
-const MAX_FILES = 5;                 // 한 번에 최대 5장
-const MAX_SIZE = 2 * 1024 * 1024;    // 각 파일 최대 2MB
+type ServerSettings = {
+  MAX_FILES: number;
+  MAX_BYTES: number;
+};
 
 const fileToBase64 = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -41,26 +41,27 @@ export default function Analyze() {
   const [taskStatus, setTaskStatus] = useState<string | null>(null);
   const [mainViewerUrl, setMainViewerUrl] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
+  const [serverSettings, setServerSettings] = useState<ServerSettings | null>(null);
 
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      // object URL 정리
+      analysisStates.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
     };
+  }, [analysisStates]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get<ServerSettings>('/settings');
+        setServerSettings(data);
+      } catch { /* 무시 */ }
+    })();
   }, []);
 
   useEffect(() => {
-    const savedStatesJSON = sessionStorage.getItem('analysisStates');
     const savedVideoUrl = sessionStorage.getItem('lastVideoUrl');
-    if (savedStatesJSON) {
-      const savedStates: StorableAnalysisState[] = JSON.parse(savedStatesJSON);
-      const restoredStates: AnalysisState[] = savedStates.map(s => ({
-        ...s,
-        file: new File([], s.fileName, { type: s.fileType }),
-        previewUrl: s.previewUrl,
-      }));
-      setAnalysisStates(restoredStates);
-      if (restoredStates.length > 0 && !savedVideoUrl) setMainViewerUrl(restoredStates[0].previewUrl);
-    }
     if (savedVideoUrl) {
       setVideoUrl(savedVideoUrl);
       setMainViewerUrl(savedVideoUrl);
@@ -68,35 +69,14 @@ export default function Analyze() {
     }
   }, []);
 
-  useEffect(() => {
-    if (analysisStates.length > 0) {
-      const storableStates: StorableAnalysisState[] = analysisStates.map(({ file, ...rest }) => ({
-        ...rest,
-        fileName: file.name,
-        fileType: file.type,
-      }));
-      sessionStorage.setItem('analysisStates', JSON.stringify(storableStates));
-    } else {
-      sessionStorage.removeItem('analysisStates');
-    }
-  }, [analysisStates]);
-
-  const fileToBase64Url = (file: File): Promise<string> =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-    });
+  const makeObjectUrl = (file: File) => URL.createObjectURL(file);
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const filtered = acceptedFiles
-      .filter(f => f.size > 0 && f.type.startsWith('image/'))
-      .filter(f => f.size <= MAX_SIZE)
-      .slice(0, MAX_FILES);
+      .filter(f => f.size > 0 && f.type.startsWith('image/'));  // 크기/개수 필터 제거
 
     if (filtered.length === 0) {
-      setTaskStatus(`이미지 개수/크기 제한을 확인하세요. (최대 ${MAX_FILES}장, 각 ${Math.round(MAX_SIZE/1024/1024)}MB 이하)`);
+      setTaskStatus(`이미지를 추가해 주세요.`);
       return;
     }
 
@@ -104,7 +84,7 @@ export default function Analyze() {
       filtered.map(async file => ({
         id: `${file.name}-${file.lastModified}-${Math.random()}`,
         file,
-        previewUrl: await fileToBase64Url(file),
+        previewUrl: makeObjectUrl(file),
         result: null,
         error: null,
         isLoading: false,
@@ -135,11 +115,6 @@ export default function Analyze() {
   const handleAnalyze = async () => {
     const targets = analysisStates.filter(s => s.file?.size > 0 && !s.result && !s.error);
     if (targets.length === 0) return;
-
-    if (targets.length > MAX_FILES) {
-      setTaskStatus(`한 번에 최대 ${MAX_FILES}장만 분석할 수 있어요.`);
-      return;
-    } 
 
     setIsAnalyzing(true);
     setMainViewerUrl(null);
@@ -258,6 +233,7 @@ export default function Analyze() {
     });
 
   const handleClearAll = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     setAnalysisStates([]);
     setVideoUrl(null);
     setTaskStatus(null);
@@ -277,12 +253,23 @@ export default function Analyze() {
 
   const hasSelectedItems = analysisStates.some(s => s.isSelected);
 
+  const selected = analysisStates.find(s => s.previewUrl === mainViewerUrl);
+  const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
+
   return (
     <div className="bg-slate-50 min-h-screen flex flex-col font-sans">
       <main className="flex-grow grid grid-cols-1 lg:grid-cols-12 gap-6 p-4 sm:p-6">
         <div className="lg:col-span-8 xl:col-span-9 flex flex-col gap-6">
           {/* 미디어 뷰어 */}
-          <motion.div layout className="bg-white rounded-2xl shadow-lg flex items-center justify-center relative overflow-hidden min-h-[300px] sm:min-h-[400px] md:min-h-[500px] p-2">
+          <motion.div
+            layout
+            className={
+              "bg-white rounded-2xl shadow-lg flex items-center justify-center relative overflow-hidden p-2 " +
+              (hasDetectionsInSelected
+                ? "min-h-[420px] sm:min-h-[560px] md:min-h-[680px]"   // 결과 크~게
+                : "min-h-[240px] sm:min-h-[300px] md:min-h-[360px]")  // 미리보기 작게
+            }
+          >
             <AnimatePresence>
               {!mainViewerUrl && (
                 <motion.div
@@ -348,6 +335,23 @@ export default function Analyze() {
                       : 'border-transparent hover:border-indigo-300'
                   }`}
                 >
+                  <div
+                    className="absolute top-1 left-1 z-10"
+                    onClick={(e) => e.stopPropagation()} // 클릭 버블 방지
+                  >
+                    <input
+                      type="checkbox"
+                      checked={state.isSelected}
+                      onChange={(e) => {
+                        e.stopPropagation();
+                        setAnalysisStates(prev =>
+                          prev.map(s => s.id === state.id ? { ...s, isSelected: !s.isSelected } : s)
+                        );
+                      }}
+                      className="w-4 h-4 accent-indigo-600"
+                      aria-label="선택"
+                    />
+                  </div>
                   <div className="relative w-full h-full overflow-visible">
                     <img
                       src={state.previewUrl}
@@ -358,7 +362,7 @@ export default function Analyze() {
                     {state.result?.map((det, i) => (
                       <div
                         key={i}
-                        className="absolute border-2 border-yellow-400 rounded-sm"
+                        className="absolute border-[3px] md:border-4 border-yellow-400 rounded-sm"
                         style={{
                           left: `${det.boundingBox.x * 100}%`,
                           top: `${det.boundingBox.y * 100}%`,
@@ -366,7 +370,7 @@ export default function Analyze() {
                           height: `${det.boundingBox.height * 100}%`,
                         }}
                       >
-                        <div className="absolute top-0 left-0 bg-black bg-opacity-80 text-white text-[10px] px-1 rounded-sm shadow-sm font-semibold whitespace-nowrap">
+                        <div className="absolute top-0 left-0 bg-black/80 text-white text-[11px] sm:text-xs px-1.5 rounded-sm font-semibold whitespace-nowrap">
                           {det.ripeness} {Number((det.confidence * 100).toFixed(1))}%
                         </div>
                       </div>
@@ -404,6 +408,12 @@ export default function Analyze() {
             <UploadCloud className="w-12 h-12 mx-auto mb-2 text-slate-400" />
             <p className="font-semibold text-slate-700">클릭 또는 드래그하여 파일 추가</p>
             <p className="text-xs text-slate-500 mt-1">PNG, JPG, WEBP 지원</p>
+            {serverSettings && (
+              <p className="text-[11px] text-slate-400 mt-1">
+                서버 제한: {serverSettings.MAX_FILES === 0 ? '개수 무제한' : `최대 ${serverSettings.MAX_FILES}장`},
+                {serverSettings.MAX_BYTES === 0 ? ' 용량 무제한' : ` 파일당 ${Math.floor(serverSettings.MAX_BYTES/1024/1024)}MB`}
+              </p>
+            )}
           </div>
 
           {analysisStates.length > 0 && (

@@ -3,10 +3,10 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
+from models import Base 
 from passlib.context import CryptContext
 from jose import jwt
 from sqlalchemy import Column, Integer, String, Boolean, create_engine, Boolean
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import datetime
 
@@ -28,7 +28,6 @@ def verify_password(plain_password, hashed):
 SQLALCHEMY_DATABASE_URL = "sqlite:///./users.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
-Base = declarative_base()
 
 class User(Base):
     __tablename__ = "users"

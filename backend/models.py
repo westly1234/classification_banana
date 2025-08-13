@@ -2,6 +2,7 @@
 
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, LargeBinary, Date
 from sqlalchemy.sql import func
+from models import Base 
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 import pytz
@@ -9,8 +10,6 @@ import pytz
 KST = pytz.timezone("Asia/Seoul")
 def get_kst_now():
     return datetime.now(KST)
-
-Base = declarative_base()
 
 class User(Base):
     __tablename__ = "users"
