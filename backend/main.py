@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import os, asyncio, concurrent.futures, base64, io, uuid, threading, time, smtplib, pytz, cv2, torch, numpy as np
+import os, asyncio, concurrent.futures, base64, uuid, threading, time, smtplib, pytz, cv2, torch, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -18,7 +18,6 @@ from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import List
@@ -28,9 +27,9 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 # SQLAlchemy 관련 import 문 추가
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, func, LargeBinary
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 
 # SQLAdmin 관련 import 문 추가
 from sqladmin import Admin, ModelView
@@ -44,11 +43,8 @@ from ultralytics import YOLO
 from db import engine, SessionLocal, init_db
 from models import User, Analysis, DailyAnalysisStat
 
-init_db()
 # --- 한국 시간 설정 ---
 KST = pytz.timezone("Asia/Seoul")
-def get_kst_now():
-    return datetime.now(KST)
 
 # --- 🔐 인증 및 암호화 설정 ---
 SECRET_KEY = '482a2ca94b3c91eeb219221cb86decb51d1969a9fe3accb8e547909907ccd932'
@@ -63,27 +59,7 @@ def verify_password(plain_password, hashed):
     return pwd_context.verify(plain_password, hashed)
 
 # --- 🗄️ DB 설정 ---
-# Render 환경에서는 DATABASE_URL 환경 변수를 사용하고, 로컬에서는 SQLite를 사용합니다.
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-if DATABASE_URL and DATABASE_URL.startswith("postgres"):
-    # Render의 PostgreSQL URL 형식에 맞게 드라이버 이름을 변경합니다.
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,
-        pool_size=5, max_overflow=5,
-        pool_recycle=180,     # ✅ 3분마다 커넥션 재활용
-        pool_timeout=30,
-        connect_args={"sslmode":"require"}  # URL에 ?sslmode=require가 있으면 생략 가능
-    )
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-else:
-    # 로컬 개발 환경용 SQLite 설정
-    print("⚠️  DATABASE_URL 환경 변수를 찾을 수 없습니다. 로컬 SQLite DB를 사용합니다.")
-    SQLALCHEMY_DATABASE_URL = "sqlite:///./users.db"
-    engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) 
 
 # --- 📦 Pydantic 모델 ---
 class UserCreate(BaseModel):
@@ -252,13 +228,40 @@ def get_db():
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "best.pt"
 
-try:
-    model = YOLO(MODEL_PATH)
-    print("✅ YOLO 모델 로딩 성공!")
-except Exception as e:
-    print(f"❌ YOLO 모델 로딩 실패: {e}")
-    # 모델 로딩에 실패하면 서버가 시작되지 않도록 처리할 수도 있습니다.
-    model = None
+# 3-1) 전역 상태
+model = None
+MODEL_READY = False
+DB_READY = False
+
+# 3-2) 무거운 초기화 함수
+def _heavy_init():
+    global model, MODEL_READY, DB_READY
+    try:
+        # init_db() 가 무겁다면 여기에서 실행
+        init_db()
+        DB_READY = True
+        print("✅ DB init done")
+    except Exception as e:
+        print("❌ DB init failed:", e)
+
+    try:
+        from ultralytics import YOLO
+        m = YOLO(MODEL_PATH)
+        globals()["model"] = m
+        MODEL_READY = True
+        print("✅ YOLO loaded")
+    except Exception as e:
+        print("❌ YOLO load failed:", e)
+
+# 3-3) 스타트업에서 비동기 시작
+@app.on_event("startup")
+def startup():
+    threading.Thread(target=_heavy_init, daemon=True).start()
+
+# 3-4) 헬스체크는 즉시 200
+@app.get("/ping")
+def ping():
+    return {"ok": True, "model": MODEL_READY, "db": DB_READY}
 
 KOREAN_CLASSES = {
     "freshripe": "신선한 완숙",
@@ -413,11 +416,12 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
 
     # 이메일 인증 토큰 발송
     token = jwt.encode({"sub": user.email}, SECRET_KEY, algorithm=ALGORITHM)
-    verification_link = f"http://localhost:8000/verify/{token}"
-    SMTP_SERVER = "smtp.gmail.com"
-    SMTP_PORT = 587
-    SMTP_USER = "forgpt0405@gmail.com"
-    SMTP_PASSWORD = "oxtf iqer cmuj klzr"  # Gmail 앱 비밀번호 사용 권장
+    BACKEND_ORIGIN = os.getenv("BACKEND_ORIGIN", "http://localhost:8000")
+    verification_link = f"{BACKEND_ORIGIN}/auth/verify/{token}"
+    SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+    SMTP_PORT = os.getenv("SMTP_PORT", 587)
+    SMTP_USER = os.getenv("SMTP_USER", "forgpt0405@gmail.com")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "oxtf iqer cmuj klzr")  # Gmail 앱 비밀번호 사용 권장
 
     def send_email(to_email: str, verify_link: str):
         subject = "바나나-리텍스 회원가입 이메일 인증"
@@ -690,8 +694,8 @@ def get_result_file(filename: str):
 # --- 분석 라우터 (모든 API에 인증 필요) ---
 @analysis_router.post("/analyze")
 async def analyze_single_image(payload: ImagePayload, current_user: User = Depends(get_current_user)):
-    if not model:
-        raise HTTPException(status_code=503, detail="모델이 현재 사용할 수 없습니다.")
+    if not MODEL_READY or model is None:
+        raise HTTPException(status_code=503, detail="모델이 준비 중입니다. 잠시 후 다시 시도해주세요.")
     try:
         img_bytes = base64.b64decode(payload.image)
         # 1) 빠른 디코드 + 레터박스(동기 OK)
@@ -952,12 +956,7 @@ def generate_today_stats():
     finally:
         db.close()  
 
-@app.get("/ping")
-def ping():
-    return {"ok": True}
-
 # 서버 제한값을 환경변수화 + 프론트에 자동 전파
-settings_router = APIRouter(tags=["Settings"])
 
 def _int(name, default): return int(os.getenv(name, str(default)))
 def _float(name, default): return float(os.getenv(name, str(default)))

@@ -4,64 +4,62 @@ import { useAuth } from '../contexts/AuthContext';
 import api from './api'; 
 
 export default function AuthPage() {
-    const [isLoginView, setIsLoginView] = useState(true);
-    const [nickname, setNickname] = useState('');
-    const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
-    const [confirmPassword, setConfirmPassword] = useState('');
-    const [error, setError] = useState('');
-    const [loading, setLoading] = useState(false);
-    const navigate = useNavigate();
-    const location = useLocation();
-    const { login } = useAuth();
+  const [isLoginView, setIsLoginView] = useState(true);
+  const [nickname, setNickname] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { login } = useAuth();
 
-    const from = location.state?.from?.pathname || "/analyze";
+  const from = location.state?.from?.pathname || "/analyze";
 
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
-        setError("");
-        setLoading(true);
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
 
-        try {
-            if (isLoginView) {
-            // 🔐 로그인 (x-www-form-urlencoded)
-            const params = new URLSearchParams();
-            params.append("username", email);
-            params.append("password", password);
+    try {
+      if (isLoginView) {
+        // 🔐 로그인 (x-www-form-urlencoded)
+        const params = new URLSearchParams();
+        params.append("username", email);
+        params.append("password", password);
 
-            const res = await api.post("/auth/login", params, {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                timeout: 30000,
-            });
+        const res = await api.post(
+          "/auth/login",
+          params,
+          { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+        );
 
-            const token = res.data.access_token;
-                login(token);
-                navigate(from, { replace: true });
-                return;
-            }
+        const token = res.data.access_token;
+        login(token);
+        navigate(from, { replace: true });
+        return; // finally에서 loading 해제
+      }
 
-            // 📝 회원가입
-            if (password !== confirmPassword) {
-                setError("비밀번호가 일치하지 않습니다.");
-                return;
-            }
+      // 📝 회원가입
+      if (password !== confirmPassword) {
+        setError("비밀번호가 일치하지 않습니다.");
+        return;
+      }
 
-            await api.post("/auth/signup", {
-                nickname,
-                email,
-                password,
-                password_confirm: confirmPassword,
-            });
+      await api.post("/auth/signup", {
+        nickname, email, password, password_confirm: confirmPassword
+      });
 
-            alert("이메일 인증 링크가 발송되었습니다. 메일을 확인해주세요.");
-            setIsLoginView(true);
-        } catch (err: any) {
-            console.error("❌ 요청 실패:", err.response?.data || err);
-            setError(err.response?.data?.detail || "요청 처리 중 오류가 발생했습니다.");
-        } finally {
-            setLoading(false);
-        }
-    };
+      alert("이메일 인증 링크가 발송되었습니다. 메일을 확인해주세요.");
+      setIsLoginView(true);
+    } catch (err: any) {
+      console.error("❌ 요청 실패:", err.response?.data || err);
+      setError(err.response?.data?.detail || "요청 처리 중 오류가 발생했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
     return (
         <div className="flex items-center justify-center min-h-screen bg-brand-gray-50">
