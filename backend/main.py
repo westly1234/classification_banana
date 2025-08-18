@@ -839,16 +839,23 @@ async def get_task_status(task_id: str, request: Request):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    result = task.get("result")
+    result = task.get("result")  # 보통 "/results/xxx.mp4"
     absolute_result = None
-    if isinstance(result, str) and result.startswith("/"):
-        base = str(request.base_url).rstrip("/")
-        absolute_result = f"{base}{result}"
+
+    if isinstance(result, str):
+        # 이미 절대 URL이면 그대로 사용
+        if result.startswith("http://") or result.startswith("https://"):
+            absolute_result = result
+        elif result.startswith("/"):
+            # 프록시 헤더에서 첫 값 사용
+            proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
+            host  = (request.headers.get("x-forwarded-host")  or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
+            absolute_result = f"{proto}://{host}{result}"
 
     return {
-        "status": task["status"],
-        "result": result,
-        "absolute_result": absolute_result,   # ← 프런트는 이걸 우선 사용
+        "status": task.get("status"),
+        "result": result,                 # 상대 경로 유지
+        "absolute_result": absolute_result,  # 프런트는 이걸 우선 사용
         "image_results": task.get("image_results", []),
     }
 

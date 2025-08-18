@@ -43,48 +43,12 @@ export default function Analyze() {
   const pollRef = useRef<number | null>(null);
   const [serverSettings, setServerSettings] = useState<ServerSettings | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-      // object URL 정리
-      analysisStates.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
-    };
-  }, []);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const { data } = await api.get<ServerSettings>('/settings');
-        setServerSettings(data);
-      } catch { /* 무시 */ }
-    })();
-  }, []);
-
-  useEffect(() => {
-    const savedVideoUrl = sessionStorage.getItem('lastVideoUrl');
-    if (savedVideoUrl) {
-      const withTs = `${savedVideoUrl}?t=${Date.now()}`;
-      setVideoUrl(withTs);
-      setMainViewerUrl(withTs);
-      setTaskStatus('이전 동영상 분석 결과를 불러왔습니다.');
-    }
-  }, []);
-
+  const hasSelectedItems = analysisStates.some(s => s.isSelected);
+  const selected = analysisStates.find(s => s.id === activeId) || null;
+  const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
+  const hasMedia = analysisStates.length > 0 || Boolean(mainViewerUrl || videoUrl);
   const leftColRef = useRef<HTMLDivElement | null>(null);
   const [leftColH, setLeftColH] = useState(0);
-
-  useLayoutEffect(() => {
-    if (!leftColRef.current) return;
-    const measure = () =>
-      setLeftColH(Math.round(leftColRef.current!.getBoundingClientRect().height));
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(leftColRef.current);
-    window.addEventListener('resize', measure);
-    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
-  }, []);
-
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [imgOverlay, setImgOverlay] = useState<{
@@ -119,6 +83,49 @@ export default function Analyze() {
     setImgOverlay({ offX, offY, drawW, drawH });
   }, []);
 
+  useEffect(() => {
+    calcOverlay();
+  }, [calcOverlay, mainViewerUrl, selected?.result, leftColH]);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      // object URL 정리
+      analysisStates.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
+    };
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get<ServerSettings>('/settings');
+        setServerSettings(data);
+      } catch { /* 무시 */ }
+    })();
+  }, []);
+
+  useEffect(() => {
+    const savedRel = sessionStorage.getItem('lastVideoUrl');
+    if (savedRel) {
+      const absolute = api.getUri({ url: savedRel }); // baseURL로 복원
+      const withTs = `${absolute}?t=${Date.now()}`;
+      setVideoUrl(withTs);
+      setMainViewerUrl(withTs);
+      setTaskStatus('이전 동영상 분석 결과를 불러왔습니다.');
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!leftColRef.current) return;
+    const measure = () =>
+      setLeftColH(Math.round(leftColRef.current!.getBoundingClientRect().height));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(leftColRef.current);
+    window.addEventListener('resize', measure);
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
+  }, []);
+
   // ✅ 관찰자/리스너 세팅
   useLayoutEffect(() => {
     const roWrap = new ResizeObserver(() => calcOverlay());
@@ -138,7 +145,12 @@ export default function Analyze() {
       window.removeEventListener('resize', calcOverlay);
       imgEl?.removeEventListener('load', onLoad);
     };
-}, [calcOverlay]);
+  }, [calcOverlay]);
+
+
+  useEffect(() => {
+    calcOverlay();
+  }, [calcOverlay, mainViewerUrl, selected?.result, leftColH]);
 
   const makeObjectUrl = (file: File) => URL.createObjectURL(file);
 
@@ -269,11 +281,13 @@ export default function Analyze() {
               pollRef.current = null;
 
               if (data.status === 'SUCCESS') {
-                const finalUrl = data.absolute_result || data.result;
-                const withTs = `${finalUrl}?t=${Date.now()}`;
+                const finalRel = data.result;          
+                const absolute = data.absolute_result ?? api.getUri({ url: finalRel });
+                const withTs = `${absolute}?t=${Date.now()}`;
+
                 setVideoUrl(withTs);
                 setMainViewerUrl(withTs);
-                sessionStorage.setItem('lastVideoUrl', finalUrl);
+                sessionStorage.setItem('lastVideoUrl', finalRel);     
                 setTaskStatus(null);
                 resolve();
               } else {
@@ -327,12 +341,6 @@ export default function Analyze() {
       return kept;
     });
   };
-
-  const hasSelectedItems = analysisStates.some(s => s.isSelected);
-
-  const selected = analysisStates.find(s => s.id === activeId) || null;
-  const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
-  const hasMedia = analysisStates.length > 0 || Boolean(mainViewerUrl || videoUrl);
 
   return (
     <div className="bg-slate-50 min-h-screen flex flex-col font-sans">
