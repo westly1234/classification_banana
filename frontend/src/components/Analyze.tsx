@@ -283,10 +283,10 @@ export default function Analyze() {
               if (data.status === 'SUCCESS') {
                 const finalRel = data.result;          
                 const absolute = data.absolute_result ?? api.getUri({ url: finalRel });
-                const withTs = `${absolute}?t=${Date.now()}`;
+                const bust = `?t=${Date.now()}`;
 
-                setVideoUrl(withTs);
-                setMainViewerUrl(withTs);
+                setVideoUrl(absolute + bust);
+                setMainViewerUrl(absolute + bust);
                 sessionStorage.setItem('lastVideoUrl', finalRel);     
                 setTaskStatus(null);
                 resolve();
@@ -376,15 +376,16 @@ export default function Analyze() {
               (mainViewerUrl === videoUrl ? (
                 // ✅ react-player로 교체 (캐시 방지 쿼리 유지)
                 <div className="w-full h-full max-h-[500px]">
-                  <ReactPlayer
+                  <video
                     key={mainViewerUrl || ''}
-                    url={mainViewerUrl}
+                    src={videoUrl || undefined}
                     controls
-                    playing={false}
+                    autoPlay
                     muted
                     loop
-                    width="100%"
-                    height="100%"
+                    playsInline
+                    preload="auto"
+                    className="w-full h-full object-contain rounded-lg bg-black"
                     onError={(e: any) => {
                       console.error('video load error', e);
                       setTaskStatus('비디오 로드 실패 (네트워크/URL 확인)');
@@ -407,10 +408,10 @@ export default function Analyze() {
                       style={{
                         left: imgOverlay.offX,
                         top: imgOverlay.offY,
-                    width: imgOverlay.drawW,
-                    height: imgOverlay.drawH,
-                  }}
-                >
+                        width: imgOverlay.drawW,
+                        height: imgOverlay.drawH,
+                      }}
+                    >
                   {selected.result.map((det, i) => {
                     const l = det.boundingBox;
                     const x = l.x * imgOverlay.drawW;
@@ -530,9 +531,7 @@ export default function Analyze() {
 
         {/* 제어판 */}
         <aside
-          className={`lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start ${
-            hasMedia ? 'self-start overflow-auto' : ''         // 긴 모드일 때만 고정/스크롤
-          }`}
+          className={`lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start ${hasMedia ? 'self-start sticky top-6 overflow-auto max-h-[85vh]' : ''}`}
           style={hasMedia ? { minHeight: leftColH || undefined } : undefined}  // ✅ 이미지 있을 때만 높이 맞추기
         >
           <h2 className="text-lg sm:text-2xl font-bold text-slate-900 mb-3">제어판</h2>

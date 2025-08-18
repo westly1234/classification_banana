@@ -562,9 +562,10 @@ class FFMpegPipeWriter:
                 "-f", "rawvideo", "-vcodec", "rawvideo",
                 "-pix_fmt", "bgr24",
                 "-s", f"{w}x{h}",
-                "-r", str(fps),
+                "-r", str(fps),           # 입력 fps
                 "-i", "pipe:0",
                 "-c:v", "libx264",
+                "-r", str(fps),           # 🔸출력 fps도 명시
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart",
                 "-preset", "veryfast",
