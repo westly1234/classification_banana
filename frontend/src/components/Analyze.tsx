@@ -49,7 +49,7 @@ export default function Analyze() {
       // object URL 정리
       analysisStates.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
     };
-  }, [analysisStates]);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -290,6 +290,7 @@ export default function Analyze() {
 
   const handleClearAll = () => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    analysisStates.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
     setAnalysisStates([]);
     setVideoUrl(null);
     setTaskStatus(null);
@@ -299,11 +300,13 @@ export default function Analyze() {
 
   const handleDeleteSelected = () => {
     setAnalysisStates(prev => {
-      const newStates = prev.filter(s => !s.isSelected);
-      if (mainViewerUrl && !newStates.some(s => s.previewUrl === mainViewerUrl)) {
-        setMainViewerUrl(newStates[0]?.previewUrl || null);
+      const removed = prev.filter(s => s.isSelected);
+      removed.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
+      const kept = prev.filter(s => !s.isSelected);
+      if (mainViewerUrl && !kept.some(s => s.previewUrl === mainViewerUrl)) {
+        setMainViewerUrl(kept[0]?.previewUrl || null);
       }
-      return newStates;
+      return kept;
     });
   };
 
@@ -316,7 +319,7 @@ export default function Analyze() {
   return (
     <div className="bg-slate-50 min-h-screen flex flex-col font-sans">
       <main className="flex-grow grid grid-cols-1 lg:grid-cols-12 gap-6 p-4 sm:p-6">
-        <div className="lg:col-span-8 xl:col-span-9 flex flex-col gap-6">
+        <div ref={leftColRef} className="lg:col-span-8 xl:col-span-9 flex flex-col gap-6">
           {/* 미디어 뷰어 */}
           <motion.div
             layout
@@ -364,7 +367,7 @@ export default function Analyze() {
                 </div>
               ) : (
                 // 이미지 + 박스
-                <div ref={imgWrapRef} className="relative w-full flex justify-center items-center">
+                <div ref={imgWrapRef} className="relative w-full h-full flex justify-center items-center">
                   <img
                     ref={imgRef}
                     src={mainViewerUrl}
@@ -400,7 +403,7 @@ export default function Analyze() {
           </motion.div>
 
           {/* 썸네일 스트립 */}
-          <div ref={leftColRef} className="lg:col-span-8 xl:col-span-9 bg-white flex flex-col gap-6">
+          <div className="lg:col-span-8 xl:col-span-9 bg-white flex flex-col gap-6">
             <div className="flex items-center gap-2 mb-2">
               <Files className="w-5 h-5 text-slate-500" />
               <h3 className="text-sm sm:text-md font-bold text-slate-700">
