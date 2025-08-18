@@ -5,11 +5,11 @@ import { AnimatePresence, motion } from 'framer-motion';
 import type { YoloAnalysisResult, ImageAnalysisResultPayload } from '../types';
 import api from './api';
 import { UploadCloud, Trash2, XCircle, Loader2, Image, Sparkles, Files } from 'lucide-react';
-import ReactPlayer from 'react-player';
+//import ReactPlayer from 'react-player';
 
 interface AnalysisState {
   id: string;
-  file: File;
+  file: File | null; 
   previewUrl: string;
   result: YoloAnalysisResult[] | null;
   error: string | null;
@@ -17,6 +17,9 @@ interface AnalysisState {
   isSelected: boolean;
   avg_confidence?: number;
 }
+
+type WithFile = AnalysisState & { file: File };
+
 type ServerSettings = {
   MAX_FILES: number;
   MAX_BYTES: number;
@@ -33,6 +36,25 @@ const fileToBase64 = (file: File): Promise<string> =>
     };
     reader.onerror = error => reject(error);
   });
+
+// Data URL로 변환 (새로고침 복원에 유리)
+const fileToDataUrl = (file: File) =>
+  new Promise<string>((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result as string);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+
+// 스트립 상태를 얇게 저장해서 세션에 보존
+type SlimState = Pick<AnalysisState, 'id' | 'previewUrl' | 'result' | 'avg_confidence'>;
+
+const persistStrip = (arr: AnalysisState[]) => {
+  const slim: SlimState[] = arr.map(({ id, previewUrl, result, avg_confidence }) => ({
+    id, previewUrl, result, avg_confidence,
+  }));
+  sessionStorage.setItem('imageStrip', JSON.stringify(slim));
+};
 
 export default function Analyze() {
   const [analysisStates, setAnalysisStates] = useState<AnalysisState[]>([]);
@@ -84,14 +106,8 @@ export default function Analyze() {
   }, []);
 
   useEffect(() => {
-    calcOverlay();
-  }, [calcOverlay, mainViewerUrl, selected?.result, leftColH]);
-
-  useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
-      // object URL 정리
-      analysisStates.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
     };
   }, []);
 
@@ -113,6 +129,31 @@ export default function Analyze() {
       setMainViewerUrl(withTs);
       setTaskStatus('이전 동영상 분석 결과를 불러왔습니다.');
     }
+  }, []);
+
+  useEffect(() => {
+    const saved = sessionStorage.getItem('imageStrip');
+    if (!saved) return;
+
+    try {
+      const arr = JSON.parse(saved) as SlimState[];
+      if (!Array.isArray(arr) || arr.length === 0) return;
+
+      setAnalysisStates(arr.map(a => ({
+        id: a.id,
+        file: null,                 // 복원 시에는 파일이 없음
+        previewUrl: a.previewUrl,   // data URL
+        result: a.result ?? null,
+        error: null,
+        isLoading: false,
+        isSelected: false,
+        avg_confidence: a.avg_confidence,
+      })));
+
+      // 미디어 뷰어 첫 장 보여주기
+      setActiveId(arr[0]?.id ?? null);
+      setMainViewerUrl(prev => prev ?? arr[0]?.previewUrl ?? null);
+    } catch {}
   }, []);
 
   useLayoutEffect(() => {
@@ -152,22 +193,21 @@ export default function Analyze() {
     calcOverlay();
   }, [calcOverlay, mainViewerUrl, selected?.result, leftColH]);
 
-  const makeObjectUrl = (file: File) => URL.createObjectURL(file);
+  //const makeObjectUrl = (file: File) => URL.createObjectURL(file);
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    const filtered = acceptedFiles
-      .filter(f => f.size > 0 && f.type.startsWith('image/'));  // 크기/개수 필터 제거
-
+    const filtered = acceptedFiles.filter(f => f.size > 0 && f.type.startsWith('image/'));
     if (filtered.length === 0) {
-      setTaskStatus(`이미지를 추가해 주세요.`);
+      setTaskStatus('이미지를 추가해 주세요.');
       return;
     }
 
+    // previewUrl을 Data URL로 만들어 새로고침에도 남도록
     const newStates: AnalysisState[] = await Promise.all(
       filtered.map(async file => ({
         id: `${file.name}-${file.lastModified}-${Math.random()}`,
         file,
-        previewUrl: makeObjectUrl(file),
+        previewUrl: await fileToDataUrl(file),   // ⬅️ 여기
         result: null,
         error: null,
         isLoading: false,
@@ -180,18 +220,22 @@ export default function Analyze() {
     setTaskStatus(null);
     sessionStorage.removeItem('lastVideoUrl');
 
-    if (!activeId) {
-      setActiveId(newStates[0].id);
-      setMainViewerUrl(newStates[0].previewUrl);
-    }
     setAnalysisStates(prev => {
       const combined = [...prev, ...newStates];
+
+      // 첫 업로드라면 뷰어에 첫 장 띄우기
       if (!mainViewerUrl || prev.length === 0) {
         setMainViewerUrl(newStates[0].previewUrl);
       }
+
+      if (!activeId && prev.length === 0) {
+        setActiveId(newStates[0].id);
+      }
+
+      persistStrip(combined);      // ⬅️ 세션 보존
       return combined;
     });
-  }, [mainViewerUrl, activeId]);
+  }, [mainViewerUrl]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -200,7 +244,10 @@ export default function Analyze() {
   });
 
   const handleAnalyze = async () => {
-    const targets = analysisStates.filter(s => s.file?.size > 0 && !s.result && !s.error);
+    const targets = analysisStates.filter(
+      (s): s is AnalysisState & { file: File } =>
+        !!s.file && s.file.size > 0 && !s.result && !s.error
+    );
     if (targets.length === 0) return;
 
     setIsAnalyzing(true);
@@ -215,7 +262,7 @@ export default function Analyze() {
     }
   };
 
-  const analyzeSingleImage = async (targetState: AnalysisState) => {
+  const analyzeSingleImage = async (targetState: WithFile) => {
     setActiveId(targetState.id);  
     setMainViewerUrl(targetState.previewUrl);
     setAnalysisStates(prev =>
@@ -226,24 +273,29 @@ export default function Analyze() {
       const res = await api.post<ImageAnalysisResultPayload>(`/analysis/analyze`, { image: base64Image }, { timeout: 60000 });
       const { detections, avg_confidence } = res.data;
       const formattedDetections = detections.map(d => ({ ...d, label: d.ripeness }));
-      setAnalysisStates(prev =>
-        prev.map(s =>
+      setAnalysisStates(prev => {
+        const next =prev.map(s =>
           s.id === targetState.id
             ? { ...s, result: formattedDetections, avg_confidence: avg_confidence ?? 0, isLoading: false }
             : s
-        )
-      );
+        );
+        persistStrip(next);      // ⬅️
+        return next;
+      });
     } catch (err: any) {
         const msg =
           err.response?.data?.detail ||
           (err.code === 'ECONNABORTED' ? '요청 시간이 초과되었습니다. 잠시 후 다시 시도하세요.' : '분석 실패');
-        setAnalysisStates(prev =>
-        prev.map(s => (s.id === targetState.id ? { ...s, error: msg, isLoading: false } : s))
-      );
-    }
-  };
-
-  const analyzeMultipleImagesAsVideo = (statesToAnalyze: AnalysisState[]): Promise<void> =>
+        setAnalysisStates(prev => {
+          const next = prev.map(s =>
+            s.id === targetState.id ? { ...s, error: msg, isLoading: false } : s
+          );
+          persistStrip(next);      // ⬅️
+          return next;
+        });
+      }
+  }
+  const analyzeMultipleImagesAsVideo = (statesToAnalyze: WithFile[]): Promise<void> =>
     new Promise(async (resolve, reject) => {
       setTaskStatus('이미지 분석 및 동영상 생성 요청 중...');
       const idsToAnalyze = new Set(statesToAnalyze.map(s => s.id));
@@ -252,13 +304,17 @@ export default function Analyze() {
       );
       try {
         const formData = new FormData();
-        statesToAnalyze.forEach(s => formData.append('files', s.file));
+        statesToAnalyze.forEach(s => { if (s.file) formData.append('files', s.file); });
         const res = await api.post<{ task_id: string; results: ImageAnalysisResultPayload[] }>(`/analysis/analyze_video`, formData, { timeout: 120000 });
         const { task_id, results } = res.data;
-        const resultsMap = new Map(results.map(r => [r.filename, r]));
-        setAnalysisStates(prev =>
-          prev.map(s => {
-            const match = resultsMap.get(s.file.name);
+        const norm = (s: string) => s.split('\\').pop()!.split('/').pop()!
+        const resultsMap = new Map(results.map(r => [norm(r.filename), r]));
+
+        setAnalysisStates(prev => {
+          const next = prev.map(s => {
+            const key = s.file? norm(s.file.name) : undefined;
+            const match = key ? resultsMap.get(key) : undefined;
+
             return match
               ? {
                   ...s,
@@ -268,8 +324,10 @@ export default function Analyze() {
                   error: null,
                 }
               : s;
-          })
-        );
+          });
+          persistStrip(next);                 // ⬅️
+          return next;
+        });
         setTaskStatus('동영상 생성 중...');
         setMainViewerUrl(null);
         setActiveId(null); 
@@ -318,26 +376,26 @@ export default function Analyze() {
 
   const handleClearAll = () => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-    analysisStates.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
+
     setAnalysisStates([]);
     setVideoUrl(null);
     setTaskStatus(null);
     setMainViewerUrl(null);
-    sessionStorage.clear();
+    
+    sessionStorage.removeItem('imageStrip');   // ⬅️
+    sessionStorage.removeItem('lastVideoUrl');
   };
 
   const handleDeleteSelected = () => {
     setAnalysisStates(prev => {
-      const removed = prev.filter(s => s.isSelected);
-      removed.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
       const kept = prev.filter(s => !s.isSelected);
+
       if (!kept.some(s => s.id === activeId)) {
         setActiveId(kept[0]?.id ?? null);
         setMainViewerUrl(kept[0]?.previewUrl ?? null);
       }
-      if (mainViewerUrl && !kept.some(s => s.previewUrl === mainViewerUrl)) {
-        setMainViewerUrl(kept[0]?.previewUrl || null);
-      }
+      persistStrip(kept);          // ⬅️
+
       return kept;
     });
   };
@@ -352,8 +410,8 @@ export default function Analyze() {
             className={
               "bg-white rounded-2xl shadow-lg flex items-center justify-center relative overflow-hidden p-2 " +
               (hasDetectionsInSelected
-                ? "min-h-[240px] sm:min-h-[320px] md:min-h-[400px]"   // 결과 크~게
-                : "min-h-[240px] sm:min-h-[350px] md:min-h-[420px]")  // 미리보기 작게
+                 ? "min-h-[320px] sm:min-h-[420px] md:min-h-[560px]"
+                 : "min-h-[320px] sm:min-h-[480px] md:min-h-[600px]")
             }
           >
             <AnimatePresence>
@@ -375,7 +433,7 @@ export default function Analyze() {
             {mainViewerUrl &&
               (mainViewerUrl === videoUrl ? (
                 // ✅ react-player로 교체 (캐시 방지 쿼리 유지)
-                <div className="w-full h-full max-h-[500px]">
+                <div className="w-full max-w-full aspect-video bg-black rounded-lg overflow-hidden">
                   <video
                     key={mainViewerUrl || ''}
                     src={videoUrl || undefined}
@@ -402,9 +460,9 @@ export default function Analyze() {
                     className="max-h-[500px] w-auto object-contain rounded-lg"
                     onLoad={calcOverlay}
                   />
-                  {imgOverlay && selected?.result && (
+                  {imgOverlay && selected?.result?.length ? (
                     <div
-                      className="absolute pointer-events-none"
+                      className="absolute pointer-events-none z-10"
                       style={{
                         left: imgOverlay.offX,
                         top: imgOverlay.offY,
@@ -434,10 +492,10 @@ export default function Analyze() {
                     );
                   })}
                 </div>
-              )}
+              ) : null}
             </div>
-          ))}
-
+          )
+        )}
             {taskStatus && !videoUrl && (
               <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center text-white z-10 p-4">
                 <Loader2 className="w-10 h-10 animate-spin mb-4" />
@@ -504,7 +562,7 @@ export default function Analyze() {
                           height: `${det.boundingBox.height * 100}%`,
                         }}
                       >
-                        <div className="absolute top-0 left-0 bg-black/80 text-white text-[11px] sm:text-xs px-1.5 rounded-sm font-semibold whitespace-nowrap">
+                        <div className="absolute -top-4 left-0 bg-black/80 text-white text-[10px] sm:text-xs px-1.5 rounded font-semibold whitespace-nowrap">
                           {det.ripeness} {Number((det.confidence * 100).toFixed(1))}%
                         </div>
                       </div>
@@ -531,8 +589,9 @@ export default function Analyze() {
 
         {/* 제어판 */}
         <aside
-          className={`lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start ${hasMedia ? 'self-start sticky top-6 overflow-auto max-h-[85vh]' : ''}`}
-          style={hasMedia ? { minHeight: leftColH || undefined } : undefined}  // ✅ 이미지 있을 때만 높이 맞추기
+          className={`lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col
+                      ${hasMedia ? 'sticky top-6 overflow-auto max-h-[85vh]' : ''}`}
+          style={hasMedia ? { minHeight: leftColH || undefined } : undefined}
         >
           <h2 className="text-lg sm:text-2xl font-bold text-slate-900 mb-3">제어판</h2>
           <div

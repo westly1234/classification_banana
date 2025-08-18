@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import List
+from typing import List, Tuple
 
 # 인증 관련 라이브러리
 from jose import jwt, JWTError
@@ -548,189 +548,194 @@ def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int =
         raise ValueError("이미지 디코딩 실패")
     return letterbox_image(img, dst_w, dst_h)  # BGR
 
-# --- ffmpeg 파이프 헬퍼 추가 ---
-class FFMpegPipeWriter:
-    def __init__(self, path: str, w: int, h: int, fps: int):
-        if not shutil.which("ffmpeg"):
-            raise RuntimeError("ffmpeg not found in PATH")
-        self.path = path
-        self.w, self.h, self.fps = w, h, fps
-        # bgr24 → libx264, yuv420p, faststart (브라우저 호환 최고)
-        self.proc = subprocess.Popen(
-            [
-                "ffmpeg", "-y",
-                "-f", "rawvideo", "-vcodec", "rawvideo",
-                "-pix_fmt", "bgr24",
-                "-s", f"{w}x{h}",
-                "-r", str(fps),           # 입력 fps
-                "-i", "pipe:0",
-                "-c:v", "libx264",
-                "-r", str(fps),           # 🔸출력 fps도 명시
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                "-preset", "veryfast",
-                "-crf", "23",
-                self.path,
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+VIDEO_FPS = 3         # 3~4 권장 (느리면 2, 빠르면 5)
+HOLD_SEC  = 1.2       # 한 이미지당 표시 시간(초) – 1.5~2.0으로 늘리면 더 천천히
+
+# ---------------------------
+# 오버레이(박스/라벨) 그리기
+# ---------------------------
+def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> None:
+    """
+    detections: [{boundingBox:{x,y,width,height}, ripeness, confidence}, ...]
+    좌표는 0~1 정규화된 값으로 가정.
+    """
+    for d in detections:
+        bb = d["boundingBox"]
+        x1 = int(bb["x"] * w)
+        y1 = int(bb["y"] * h)
+        x2 = int((bb["x"] + bb["width"]) * w)
+        y2 = int((bb["y"] + bb["height"]) * h)
+
+        # 박스
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 3)
+
+        # 라벨(클래스 + 정확도)
+        label = f'{d["ripeness"]} {(d["confidence"]*100):.1f}%'
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+
+        # 텍스트 배경
+        y_bg_top = max(0, y1 - th - 8)
+        cv2.rectangle(frame_bgr, (x1, y_bg_top), (x1 + tw + 8, y1), (0, 0, 0), -1)
+
+        # 텍스트
+        cv2.putText(
+            frame_bgr, label, (x1 + 4, y1 - 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
         )
-        if self.proc.stdin is None:
-            raise RuntimeError("failed to open ffmpeg stdin")
 
-    def write(self, frame_bgr):
-        # frame shape: (h, w, 3), dtype=uint8
-        self.proc.stdin.write(frame_bgr.tobytes())
+# ---------------------------------------
+# 비디오 작성(FFmpeg 우선, OpenCV 폴백)
+# ---------------------------------------
+def write_video(
+    frames_with_dets: List[Tuple[np.ndarray, list]],
+    out_path: str,
+    fps: int = VIDEO_FPS,
+    hold_sec: float = HOLD_SEC,
+) -> None:
+    """
+    frames_with_dets: [(frame_bgr, detections), ...]
+    fps:      출력 프레임레이트
+    hold_sec: 각 이미지를 몇 초 동안 유지할지 (프레임 반복)
+    """
+    if not frames_with_dets:
+        raise ValueError("frames_with_dets is empty")
 
-    def release(self):
+    h, w = frames_with_dets[0][0].shape[:2]
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    hold_frames = max(1, int(hold_sec * fps))
+
+    # 우선 FFmpeg 파이프 시도
+    using_ffmpeg = False
+    proc = None
+    if shutil.which("ffmpeg"):
         try:
-            if self.proc and self.proc.stdin:
-                self.proc.stdin.close()
-        finally:
-            if self.proc:
-                self.proc.wait(timeout=30)
-                
-def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarray]):
+            proc = subprocess.Popen(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "rawvideo",
+                    "-pix_fmt", "bgr24",
+                    "-s", f"{w}x{h}",
+                    "-r", str(fps),       # 입력 fps
+                    "-i", "-",            # 표준입력
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-tune", "zerolatency",
+                    "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    out_path,
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if proc.stdin is None:
+                raise RuntimeError("failed to open ffmpeg stdin")
+            using_ffmpeg = True
+        except Exception as e:
+            print(f"[write_video] ffmpeg open failed: {e}; fallback to OpenCV")
+
+    if not using_ffmpeg:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        vw = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+        if not vw.isOpened():
+            raise RuntimeError("OpenCV VideoWriter open failed")
+
+    try:
+        for idx, (img_bgr, dets) in enumerate(frames_with_dets):
+            frame = img_bgr.copy()
+            draw_overlay(frame, dets, w, h)
+
+            if using_ffmpeg:
+                raw = frame.tobytes()
+                for _ in range(hold_frames):
+                    proc.stdin.write(raw)
+            else:
+                for _ in range(hold_frames):
+                    vw.write(frame)
+
+            if idx % 2 == 0:
+                print(f"[write_video] progress {idx+1}/{len(frames_with_dets)}")
+
+    finally:
+        if using_ffmpeg:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            proc.wait(timeout=30)
+        else:
+            vw.release()
+
+# -------------------------------------------------------
+# create_analysis_video (DB 저장까지 포함한 완전판 함수)
+# -------------------------------------------------------
+def create_analysis_video(
+    current_user,
+    task_id: str,
+    frames_with_dets: List[Tuple[np.ndarray, list]],
+) -> None:
+    """
+    frames_with_dets: [(frame_bgr(BGR, HxWx3 uint8), detections(list)), ...]
+    detections 구조: [{ "boundingBox":{x,y,width,height}, "ripeness":str, "confidence":float, ...}, ...]
+    """
+
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
 
-    # (A) 상태 업데이트 헬퍼
-    def set_task(status:str, **extra):
+    def set_task(status: str, **extra):
         tasks[task_id] = {**tasks.get(task_id, {}), "status": status, **extra}
 
     set_task("PROCESSING", result=None)
-    print(f"[{task_id}] 비디오 생성 시작... (frames={len(frames_bgr)})")
-
-    w, h = TARGET_W, TARGET_H
-
-    # (B) 인코더 선택: ffmpeg 파이프(libx264) 우선, 실패 시 OpenCV로 폴백
-    writer = None
-    using_ffmpeg = False
-
-    if shutil.which("ffmpeg"):
-        try:
-            writer = FFMpegPipeWriter(str(final_video_path), w, h, VIDEO_FPS)
-            using_ffmpeg = True
-            print(f"[{task_id}] ffmpeg pipe opened (libx264)")
-        except Exception as e:
-            print(f"[{task_id}] ffmpeg pipe open failed: {e}; fallback to OpenCV")
-
-    if writer is None:
-        # avc1은 빼서 빨간 로그(encoder not found) 자체를 예방
-        fourcc_candidates = ["mp4v", "XVID", "MJPG"]
-        for cc in fourcc_candidates:
-            fourcc = cv2.VideoWriter_fourcc(*cc)
-            wr = cv2.VideoWriter(str(final_video_path), fourcc, VIDEO_FPS, (w, h))
-            if wr.isOpened():
-                writer = wr
-                print(f"[{task_id}] OpenCV VideoWriter opened with codec={cc}")
-                break
-            else:
-                wr.release()
-
-        if writer is None:
-            set_task("FAILURE", result="VideoWriter 초기화 실패(코덱)")
-            print(f"[{task_id}] VideoWriter open failed for all codecs")
-            return
-    
-    # YOLO warmup: 콜드스타트로 첫 프레임에서 버벅이는 것 방지
-    if model:
-        try:
-            with torch.no_grad():
-                _ = model(np.zeros((h, w, 3), dtype=np.uint8),
-                          imgsz=(w, h), conf=0.25, verbose=False)
-            print(f"[{task_id}] warmup done")
-        except Exception as e:
-            print(f"[{task_id}] warmup skip: {e}")
-
-    # (C) 전체 타임아웃(예: 180초)
-    deadline = time.time() + 180
+    print(f"[{task_id}] 비디오 생성 시작... (frames={len(frames_with_dets)})")
 
     try:
-        total_frames = int(len(frames_bgr) * SECONDS_PER_IMAGE * VIDEO_FPS)
-        total_img_width = w * len(frames_bgr)
-        infer_conf_list, ripeness_labels = [], []
+        # 1) 비디오 작성 (서버에서 박스/라벨을 직접 그려서 넣음)
+        write_video(frames_with_dets, str(final_video_path), fps=VIDEO_FPS, hold_sec=HOLD_SEC)
 
-        for i in range(total_frames):
-            if time.time() > deadline:
-                raise TimeoutError("비디오 생성 타임아웃")
-
-            current_x = int((total_img_width - w) * (i / max(1, total_frames - 1)))
-            frame = np.zeros((h, w, 3), dtype=np.uint8)
-            frame_x = 0
-            for img in frames_bgr:
-                img_start = frame_x - current_x
-                img_end = (frame_x + w) - current_x
-                if img_end > 0 and img_start < w:
-                    src_start = max(0, -img_start)
-                    src_end   = min(w, w - img_start)
-                    dst_start = max(0, img_start)
-                    dst_end   = min(w, img_end)
-                    if src_end > src_start and dst_end > dst_start:
-                        frame[:, dst_start:dst_end] = img[:, src_start:src_end]
-                frame_x += w
-
-            # 추론 간소화
-            do_infer = model and (i % INFER_EVERY_N_FRAMES == 1) and i > 5
-            if do_infer:
-                with torch.no_grad():
-                    results = model(frame, imgsz=(w, h), conf=0.25, verbose=False)
-                if results and results[0].boxes is not None:
-                    for box in results[0].boxes:
-                        x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
-                        conf = float(box.conf[0])
-                        cls_id = int(box.cls[0])
-                        cls_name = model.names[cls_id]
-                        label_ko = KOREAN_CLASSES.get(cls_name, cls_name)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                        infer_conf_list.append(conf); ripeness_labels.append(label_ko)
-
-            writer.write(frame)
-
-            if i % 10 == 0:
-                # 진행률 로그 (선택: 클라이언트에 progress도 내려주려면 tasks에 저장)
-                print(f"[{task_id}] progress {i}/{total_frames}")
-
-        if using_ffmpeg:
-            writer.release()
-            writer = None
-        else:
-            writer.release()
-            writer = None
-
-        # 생성 검증
+        # 2) 생성 검증
         if not final_video_path.exists() or final_video_path.stat().st_size == 0:
             raise IOError("최종 MP4 파일이 비어 있음")
 
-        # 결과 기록
-        final_ripeness = Counter(ripeness_labels).most_common(1)[0][0] if ripeness_labels else "분석불가"
-        freshness = LABEL_SCORE.get(final_ripeness, 0)
-        avg_conf = round(sum(infer_conf_list) / len(infer_conf_list), 3) if infer_conf_list else 0.0
+        # 3) 요약 통계: 평균 conf, 최빈 라벨
+        all_dets = [d for _, dets in frames_with_dets for d in dets]
+        avg_conf = round(sum(d["confidence"] for d in all_dets) / len(all_dets), 3) if all_dets else 0.0
+        labels = [d["ripeness"] for d in all_dets]
+        final_ripeness = Counter(labels).most_common(1)[0][0] if labels else "분석불가"
 
-        # DB 저장
+        # LABEL_SCORE 존재 시 사용, 없으면 기본 매핑/0.0
+        label_score = LABEL_SCORE
+        freshness = label_score.get(final_ripeness, 0.0)
+
+        # 4) DB 저장
         db = SessionLocal()
         try:
             with open(final_video_path, "rb") as f:
                 video_bytes = f.read()
-            username = current_user.nickname if current_user else "unknown"
+
+            username = getattr(current_user, "nickname", None) or "unknown"
+
             db.add(Analysis(
-                username=username, ripeness=final_ripeness, freshness=freshness,
-                confidence=avg_conf, video_path=f"/results/{final_video_path.name}",
-                video_blob=video_bytes, created_at=datetime.now(timezone("Asia/Seoul"))
+                username=username,
+                ripeness=final_ripeness,
+                confidence=avg_conf,
+                freshness=freshness,
+                video_path=f"/results/{final_video_path.name}",
+                video_blob=video_bytes,
+                created_at=datetime.now(timezone("Asia/Seoul")),
             ))
             db.commit()
+            # 일일 통계 갱신(프로젝트 함수 재사용)
             update_daily_analysis_stat(db, datetime.now(timezone("Asia/Seoul")).date())
         finally:
             db.close()
 
+        # 5) 태스크 성공 상태로 업데이트
         set_task("SUCCESS", result=f"/results/{final_video_path.name}")
         print(f"[{task_id}] ✅ 최종 비디오 생성 성공.")
     except Exception as e:
         set_task("FAILURE", result=str(e))
         print(f"[{task_id}] ❌ 비디오 생성 실패:", repr(e))
-    finally:
-        if writer is not None:
-            writer.release()
 
 # --- 동영상 스트리밍 함수 ---
 @app.get("/results/{filename}")
@@ -801,37 +806,50 @@ async def start_video_analysis(
         raise HTTPException(status_code=413, detail=f"이미지는 최대 {MAX_FILES}장까지 업로드 가능합니다.")
 
     task_id = str(uuid.uuid4())
-    tasks[task_id] = {"status": "PENDING", "result": None, "image_results": []}  # ← image_results 필드 유지
+    tasks[task_id] = {"status": "PENDING", "result": None, "image_results": []}
 
-    images_for_video = []
+    frames_with_dets = []   # [(resized_bgr, detections)]
+    image_results = []
+
     for f in files[:MAX_FILES]:
         content = await f.read()
         if not content:
             continue
         if len(content) > MAX_BYTES:
-            # 클라이언트가 파일별 에러를 알 수 있게 큐에 남겨도 됨
-            tasks[task_id]["image_results"].append({
+            image_results.append({
                 "filename": f.filename, "detections": [], "avg_confidence": 0,
                 "error": f"파일 용량(최대 {MAX_BYTES//1024//1024}MB) 초과"
             })
             continue
+
         try:
             resized_bgr = safe_decode_and_resize(content, TARGET_W, TARGET_H)
-            images_for_video.append(resized_bgr)
+
+            # 🔎 여기서 바로 감지(동기 OK: 3~5장 정도면 충분히 빠름)
+            dets = run_yolo_np_bgr(resized_bgr) if model else []
+            avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
+
+            frames_with_dets.append((resized_bgr, dets))
+            image_results.append({
+                "filename": f.filename, "detections": dets, "avg_confidence": avg_conf
+            })
         except Exception as e:
-            tasks[task_id]["image_results"].append({
+            image_results.append({
                 "filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)
             })
 
-    if images_for_video:
+    # 프론트에서 바로 썸네일에 박스/정확도 표시 가능
+    tasks[task_id]["image_results"] = image_results
+
+    if frames_with_dets:
         threading.Thread(
-            target=create_analysis_video, args=(current_user, task_id, images_for_video), daemon=True
+            target=create_analysis_video,
+            args=(current_user, task_id, frames_with_dets), daemon=True
         ).start()
     else:
-        tasks[task_id] = {"status": "FAILURE", "result": "유효한 이미지가 없습니다.", "image_results": []}
+        tasks[task_id] = {"status": "FAILURE", "result": "유효한 이미지가 없습니다.", "image_results": image_results}
 
-    # ✅ 즉시 200 응답 (무거운 일은 스레드에서)
-    return {"task_id": task_id, "results": tasks[task_id]["image_results"]}
+    return {"task_id": task_id, "results": image_results}
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
 @task_router.get("/{task_id}/status")
