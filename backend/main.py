@@ -834,15 +834,22 @@ async def start_video_analysis(
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
 @task_router.get("/{task_id}/status")
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str, request: Request):
     task = tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    result = task.get("result")
+    absolute_result = None
+    if isinstance(result, str) and result.startswith("/"):
+        base = str(request.base_url).rstrip("/")
+        absolute_result = f"{base}{result}"
+
     return {
         "status": task["status"],
-        "result": task.get("result"),
-        "image_results": task.get("image_results", [])
+        "result": result,
+        "absolute_result": absolute_result,   # ← 프런트는 이걸 우선 사용
+        "image_results": task.get("image_results", []),
     }
 
 # --- 통계 라우터 ---

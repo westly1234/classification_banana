@@ -3,7 +3,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { YoloAnalysisResult, ImageAnalysisResultPayload } from '../types';
-import api, { API_BASE } from './api';
+import api from './api';
 import { UploadCloud, Trash2, XCircle, Loader2, Image, Sparkles, Files } from 'lucide-react';
 import ReactPlayer from 'react-player';
 
@@ -192,11 +192,7 @@ export default function Analyze() {
               pollRef.current = null;
 
               if (data.status === 'SUCCESS') {
-                const makeAbsolute = (p: string) =>
-                  /^https?:\/\//i.test(p)
-                    ? p
-                    : `${API_BASE.replace(/\/+$/, "")}${p.startsWith("/") ? "" : "/"}${p}`; 
-                const finalUrl = makeAbsolute(data.result);
+                const finalUrl = data.absolute_result || data.result;
                 setVideoUrl(finalUrl);
                 setMainViewerUrl(finalUrl);
                 sessionStorage.setItem('lastVideoUrl', finalUrl);
@@ -392,7 +388,7 @@ export default function Analyze() {
         </div>
 
         {/* 제어판 */}
-        <aside className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col">
+        <aside className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start h-auto">
           <h2 className="text-lg sm:text-2xl font-bold text-slate-900 mb-3">제어판</h2>
           <div
             {...getRootProps()}
