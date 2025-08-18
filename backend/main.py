@@ -547,6 +547,7 @@ def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int =
     if img is None:
         raise ValueError("이미지 디코딩 실패")
     return letterbox_image(img, dst_w, dst_h)  # BGR
+
 # --- ffmpeg 파이프 헬퍼 추가 ---
 class FFMpegPipeWriter:
     def __init__(self, path: str, w: int, h: int, fps: int):
@@ -601,26 +602,35 @@ def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarra
 
     w, h = TARGET_W, TARGET_H
 
-    # (B) 코덱 폴백 시도
-    fourcc_candidates = ["avc1", "mp4v", "XVID", "MJPG"]
+    # (B) 인코더 선택: ffmpeg 파이프(libx264) 우선, 실패 시 OpenCV로 폴백
     writer = None
     using_ffmpeg = False
 
-    for cc in fourcc_candidates:
-        fourcc = cv2.VideoWriter_fourcc(*cc)
-        wr = cv2.VideoWriter(str(final_video_path), fourcc, VIDEO_FPS, (w, h))
-        if wr.isOpened():
-            writer = wr
-            print(f"[{task_id}] VideoWriter opened with codec={cc}")
-            break
-        else:
-            wr.release()
+    if shutil.which("ffmpeg"):
+        try:
+            writer = FFMpegPipeWriter(str(final_video_path), w, h, VIDEO_FPS)
+            using_ffmpeg = True
+            print(f"[{task_id}] ffmpeg pipe opened (libx264)")
+        except Exception as e:
+            print(f"[{task_id}] ffmpeg pipe open failed: {e}; fallback to OpenCV")
 
-    # OpenCV가 전부 실패하면: ffmpeg 파이프 사용
     if writer is None:
-        print(f"[{task_id}] OpenCV VideoWriter failed for all codecs; fallback to ffmpeg pipe (libx264)")
-        writer = FFMpegPipeWriter(str(final_video_path), w, h, VIDEO_FPS)
-        using_ffmpeg = True
+        # avc1은 빼서 빨간 로그(encoder not found) 자체를 예방
+        fourcc_candidates = ["mp4v", "XVID", "MJPG"]
+        for cc in fourcc_candidates:
+            fourcc = cv2.VideoWriter_fourcc(*cc)
+            wr = cv2.VideoWriter(str(final_video_path), fourcc, VIDEO_FPS, (w, h))
+            if wr.isOpened():
+                writer = wr
+                print(f"[{task_id}] OpenCV VideoWriter opened with codec={cc}")
+                break
+            else:
+                wr.release()
+
+        if writer is None:
+            set_task("FAILURE", result="VideoWriter 초기화 실패(코덱)")
+            print(f"[{task_id}] VideoWriter open failed for all codecs")
+            return
     
     # YOLO warmup: 콜드스타트로 첫 프레임에서 버벅이는 것 방지
     if model:
@@ -738,6 +748,7 @@ def get_result_file(filename: str):
 
     return FileResponse(
         candidate,
+        media_type="video/mp4",
         headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
     )
 
