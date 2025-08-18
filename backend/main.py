@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import os, asyncio, concurrent.futures, base64, uuid, threading, time, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
+import os, asyncio, concurrent.futures, base64, uuid, threading, math, time, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -559,30 +559,34 @@ def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> Non
     detections: [{boundingBox:{x,y,width,height}, ripeness, confidence}, ...]
     좌표는 0~1 정규화된 값으로 가정.
     """
-    for d in detections:
-        bb = d["boundingBox"]
-        x1 = int(bb["x"] * w)
-        y1 = int(bb["y"] * h)
-        x2 = int((bb["x"] + bb["width"]) * w)
-        y2 = int((bb["y"] + bb["height"]) * h)
+    for d in detections or []:
+        bb = d.get("boundingBox", {})
+        # 정규화 좌표 → 픽셀
+        x1 = int((bb.get("x", 0.0)) * w)
+        y1 = int((bb.get("y", 0.0)) * h)
+        x2 = int((bb.get("x", 0.0) + bb.get("width", 0.0)) * w)
+        y2 = int((bb.get("y", 0.0) + bb.get("height", 0.0)) * h)
+
+        # 프레임 경계로 클램프
+        x1 = max(0, min(w - 1, x1))
+        y1 = max(0, min(h - 1, y1))
+        x2 = max(x1 + 1, min(w, x2))
+        y2 = max(y1 + 1, min(h, y2))
 
         # 박스
         cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 3)
 
         # 라벨(클래스 + 정확도)
-        label = f'{d["ripeness"]} {(d["confidence"]*100):.1f}%'
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+        ripeness = d.get("ripeness", "")
+        conf = float(d.get("confidence", 0.0)) * 100.0
+        label = f"{ripeness} {conf:.1f}%"
 
-        # 텍스트 배경
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
         y_bg_top = max(0, y1 - th - 8)
         cv2.rectangle(frame_bgr, (x1, y_bg_top), (x1 + tw + 8, y1), (0, 0, 0), -1)
-
-        # 텍스트
-        cv2.putText(
-            frame_bgr, label, (x1 + 4, y1 - 4),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
-        )
-
+        cv2.putText(frame_bgr, label, (x1 + 4, y1 - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+        
 # ---------------------------------------
 # 비디오 작성(FFmpeg 우선, OpenCV 폴백)
 # ---------------------------------------
@@ -592,43 +596,41 @@ def write_video(
     fps: int = VIDEO_FPS,
     hold_sec: float = HOLD_SEC,
 ) -> None:
-    """
-    frames_with_dets: [(frame_bgr, detections), ...]
-    fps:      출력 프레임레이트
-    hold_sec: 각 이미지를 몇 초 동안 유지할지 (프레임 반복)
-    """
     if not frames_with_dets:
         raise ValueError("frames_with_dets is empty")
 
     h, w = frames_with_dets[0][0].shape[:2]
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    hold_frames = max(1, int(hold_sec * fps))
+    hold_frames = max(1, math.ceil(hold_sec * fps))
 
-    # 우선 FFmpeg 파이프 시도
     using_ffmpeg = False
     proc = None
+    vw = None
+
     if shutil.which("ffmpeg"):
         try:
+            cmd = [
+                "ffmpeg", "-y",
+                "-loglevel", "error",           # ⬅️ 불필요한 stderr 줄이기
+                "-f", "rawvideo",
+                "-pix_fmt", "bgr24",
+                "-s", f"{w}x{h}",
+                "-r", str(fps),                 # 입력 fps
+                "-i", "-",                      # stdin
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-tune", "zerolatency",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                out_path,
+            ]
             proc = subprocess.Popen(
-                [
-                    "ffmpeg", "-y",
-                    "-f", "rawvideo",
-                    "-pix_fmt", "bgr24",
-                    "-s", f"{w}x{h}",
-                    "-r", str(fps),       # 입력 fps
-                    "-i", "-",            # 표준입력
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-tune", "zerolatency",
-                    "-crf", "23",
-                    "-pix_fmt", "yuv420p",
-                    "-movflags", "+faststart",
-                    out_path,
-                ],
+                cmd,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,      # ⬅️ 파이프 막힘 방지
+                stderr=subprocess.DEVNULL,      # ⬅️ 파이프 막힘 방지
             )
             if proc.stdin is None:
                 raise RuntimeError("failed to open ffmpeg stdin")
@@ -640,7 +642,7 @@ def write_video(
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         vw = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
         if not vw.isOpened():
-            raise RuntimeError("OpenCV VideoWriter open failed")
+            raise RuntimeError(f"OpenCV VideoWriter open failed (size={w}x{h}, fps={fps})")
 
     try:
         for idx, (img_bgr, dets) in enumerate(frames_with_dets):
@@ -664,8 +666,10 @@ def write_video(
                 proc.stdin.close()
             except Exception:
                 pass
-            proc.wait(timeout=30)
-        else:
+            rc = proc.wait(timeout=30)
+            if rc != 0:
+                raise RuntimeError(f"ffmpeg exited with code {rc}")
+        elif vw is not None:
             vw.release()
 
 # -------------------------------------------------------
@@ -676,11 +680,6 @@ def create_analysis_video(
     task_id: str,
     frames_with_dets: List[Tuple[np.ndarray, list]],
 ) -> None:
-    """
-    frames_with_dets: [(frame_bgr(BGR, HxWx3 uint8), detections(list)), ...]
-    detections 구조: [{ "boundingBox":{x,y,width,height}, "ripeness":str, "confidence":float, ...}, ...]
-    """
-
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
 
     def set_task(status: str, **extra):
@@ -690,31 +689,22 @@ def create_analysis_video(
     print(f"[{task_id}] 비디오 생성 시작... (frames={len(frames_with_dets)})")
 
     try:
-        # 1) 비디오 작성 (서버에서 박스/라벨을 직접 그려서 넣음)
         write_video(frames_with_dets, str(final_video_path), fps=VIDEO_FPS, hold_sec=HOLD_SEC)
 
-        # 2) 생성 검증
         if not final_video_path.exists() or final_video_path.stat().st_size == 0:
             raise IOError("최종 MP4 파일이 비어 있음")
 
-        # 3) 요약 통계: 평균 conf, 최빈 라벨
         all_dets = [d for _, dets in frames_with_dets for d in dets]
-        avg_conf = round(sum(d["confidence"] for d in all_dets) / len(all_dets), 3) if all_dets else 0.0
-        labels = [d["ripeness"] for d in all_dets]
+        avg_conf = round(sum(d.get("confidence", 0.0) for d in all_dets) / len(all_dets), 3) if all_dets else 0.0
+        labels   = [d.get("ripeness", "분석불가") for d in all_dets]
         final_ripeness = Counter(labels).most_common(1)[0][0] if labels else "분석불가"
+        freshness = LABEL_SCORE.get(final_ripeness, 0.0)
 
-        # LABEL_SCORE 존재 시 사용, 없으면 기본 매핑/0.0
-        label_score = LABEL_SCORE
-        freshness = label_score.get(final_ripeness, 0.0)
-
-        # 4) DB 저장
         db = SessionLocal()
         try:
             with open(final_video_path, "rb") as f:
                 video_bytes = f.read()
-
             username = getattr(current_user, "nickname", None) or "unknown"
-
             db.add(Analysis(
                 username=username,
                 ripeness=final_ripeness,
@@ -725,12 +715,10 @@ def create_analysis_video(
                 created_at=datetime.now(timezone("Asia/Seoul")),
             ))
             db.commit()
-            # 일일 통계 갱신(프로젝트 함수 재사용)
             update_daily_analysis_stat(db, datetime.now(timezone("Asia/Seoul")).date())
         finally:
             db.close()
 
-        # 5) 태스크 성공 상태로 업데이트
         set_task("SUCCESS", result=f"/results/{final_video_path.name}")
         print(f"[{task_id}] ✅ 최종 비디오 생성 성공.")
     except Exception as e:
@@ -808,7 +796,7 @@ async def start_video_analysis(
     task_id = str(uuid.uuid4())
     tasks[task_id] = {"status": "PENDING", "result": None, "image_results": []}
 
-    frames_with_dets = []   # [(resized_bgr, detections)]
+    frames_with_dets: list[tuple[np.ndarray, list]] = []   # [(resized_bgr, detections)]
     image_results = []
 
     for f in files[:MAX_FILES]:
