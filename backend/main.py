@@ -829,14 +829,17 @@ async def start_video_analysis(
 
     task_id = str(uuid.uuid4())
 
+    # DB에 태스크 생성
     db = SessionLocal()
     try:
         set_task_db(db, task_id, status="PENDING", result=None, image_results=[])
     finally:
         db.close()
 
-    frames_with_dets: list[tuple[np.ndarray, list]] = []   # [(resized_bgr, detections)]
+    frames_with_dets: list[tuple[np.ndarray, list]] = []
     image_results = []
+
+    loop = asyncio.get_running_loop()
 
     for f in files[:MAX_FILES]:
         content = await f.read()
@@ -850,12 +853,13 @@ async def start_video_analysis(
             continue
 
         try:
-            resized_bgr = safe_decode_and_resize(content, TARGET_W, TARGET_H)
+            # ⬇️ CPU 작업은 전부 executor로
+            resized_bgr = await loop.run_in_executor(
+                EXECUTOR, safe_decode_and_resize, content, TARGET_W, TARGET_H
+            )
+            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, resized_bgr)
 
-            # 🔎 여기서 바로 감지(동기 OK: 3~5장 정도면 충분히 빠름)
-            dets = run_yolo_np_bgr(resized_bgr) if model else []
             avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
-
             frames_with_dets.append((resized_bgr, dets))
             image_results.append({
                 "filename": f.filename, "detections": dets, "avg_confidence": avg_conf
@@ -865,17 +869,19 @@ async def start_video_analysis(
                 "filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)
             })
 
-    # 프론트에서 바로 썸네일에 박스/정확도 표시 가능
+    # 썸네일 결과를 DB에 저장
     db = SessionLocal()
     try:
         set_task_db(db, task_id, image_results=image_results)
     finally:
         db.close()
 
+    # 비디오 생성은 백그라운드(현재처럼) – 요청은 즉시 반환
     if frames_with_dets:
         threading.Thread(
             target=create_analysis_video,
-            args=(current_user, task_id, frames_with_dets), daemon=True
+            args=(current_user, task_id, frames_with_dets),
+            daemon=True
         ).start()
     else:
         db = SessionLocal()
