@@ -212,8 +212,9 @@ export default function Analyze() {
 
               if (data.status === 'SUCCESS') {
                 const finalUrl = data.absolute_result || data.result;
-                setVideoUrl(finalUrl);
-                setMainViewerUrl(finalUrl);
+                const withTs = `${finalUrl}?t=${Date.now()}`;
+                setVideoUrl(withTs);
+                setMainViewerUrl(withTs);
                 sessionStorage.setItem('lastVideoUrl', finalUrl);
                 setTaskStatus(null);
                 resolve();
@@ -303,13 +304,17 @@ export default function Analyze() {
                 <div className="w-full h-full max-h-[500px]">
                   <ReactPlayer
                     key={mainViewerUrl || ''}
-                    url={`${mainViewerUrl}?t=${Date.now()}`}
+                    url={mainViewerUrl}
                     controls
                     playing={false}
                     muted
                     loop
                     width="100%"
                     height="100%"
+                    onError={(e) => {
+                      console.error('video load error', e);
+                      setTaskStatus('비디오 로드 실패 (네트워크/URL 확인)');
+                    }}
                   />
                 </div>
               ) : (
