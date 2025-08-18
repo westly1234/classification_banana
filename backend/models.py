@@ -1,9 +1,8 @@
 # backend/models.py
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, LargeBinary, Date
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, LargeBinary, Date, Text
 from sqlalchemy.sql import func
 from db import Base 
-from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 import pytz
 
@@ -43,3 +42,11 @@ class DailyAnalysisStat(Base):
     freshness = Column(Float, default=0.0)              # 신선도(%)
     accuracy = Column(Float, default=0.0)               # 정확도(%)
     total_count = Column(Integer, default=0)            # 총 분석 수
+
+class TaskStatus(Base):
+    __tablename__ = "task_status"
+    id = Column(String, primary_key=True)             # task_id
+    status = Column(String, nullable=False, index=True)   # PENDING / PROCESSING / SUCCESS / FAILURE
+    result = Column(String, nullable=True)            # "/results/xxx.mp4" 또는 절대 URL
+    image_results = Column(Text, nullable=False, default="[]")  # JSON 문자열(썸네일 결과)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import os, asyncio, concurrent.futures, base64, uuid, threading, math, time, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
+import os, asyncio, concurrent.futures, base64, uuid, threading, math, json, time, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -41,7 +41,7 @@ from ultralytics import YOLO
 
 # 로컬 DB 및 모델 초기화
 from db import engine, SessionLocal, init_db
-from models import User, Analysis, DailyAnalysisStat
+from models import User, Analysis, DailyAnalysisStat, TaskStatus
 
 # --- 한국 시간 설정 ---
 KST = pytz.timezone("Asia/Seoul")
@@ -60,6 +60,10 @@ def verify_password(plain_password, hashed):
 
 # --- 🗄️ DB 설정 ---
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# 전역 설정(중복 없이 한 번만 정의)
+def _int(name, default): return int(os.getenv(name, str(default)))
+def _float(name, default): return float(os.getenv(name, str(default)))
 
 # --- 📦 Pydantic 모델 ---
 class UserCreate(BaseModel):
@@ -214,9 +218,6 @@ task_router = APIRouter(tags=["Tasks"])
 stats_router = APIRouter(tags=["Statistics"])
 settings_router = APIRouter(tags=["Settings"])
 
-# 작업 상태 임시 저장소
-tasks = {}
-
 # --- DB 세션 종속성 ---
 def get_db():
     db = SessionLocal()
@@ -224,6 +225,27 @@ def get_db():
         yield db
     finally:
         db.close()
+def set_task_db(db, task_id: str, **fields):
+    row = db.get(TaskStatus, task_id) 
+    if row is None:
+        row = TaskStatus(id=task_id, status=fields.get("status","PENDING"))
+        db.add(row)
+    if "status" in fields: row.status = fields["status"]
+    if "result" in fields: row.result = fields["result"]
+    if "image_results" in fields:
+        row.image_results = json.dumps(fields["image_results"])
+    db.commit()
+
+def get_task_db(db, task_id: str):
+    row = db.get(TaskStatus, task_id)
+    if not row: return None
+    return {
+        "id": row.id,
+        "status": row.status,
+        "result": row.result,
+        "image_results": json.loads(row.image_results or "[]"),
+        "updated_at": row.updated_at,
+    }
 
 # --- YOLO 로드 ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -238,7 +260,6 @@ DB_READY = False
 def _heavy_init():
     global model, MODEL_READY, DB_READY
     try:
-        # init_db() 가 무겁다면 여기에서 실행
         init_db()
         DB_READY = True
         print("✅ DB init done")
@@ -246,13 +267,21 @@ def _heavy_init():
         print("❌ DB init failed:", e)
 
     try:
-        from ultralytics import YOLO
         m = YOLO(MODEL_PATH)
         globals()["model"] = m
         MODEL_READY = True
         print("✅ YOLO loaded")
     except Exception as e:
         print("❌ YOLO load failed:", e)
+
+    # ✅ 준비 끝난 뒤 통계 1회 갱신
+    try:
+        db = SessionLocal()
+        update_daily_analysis_stat(db, datetime.now(KST).date())
+    except Exception as e:
+        print("❌ update_daily_analysis_stat at startup:", e)
+    finally:
+        db.close()
 
 # 3-3) 스타트업에서 비동기 시작
 @app.on_event("startup")
@@ -327,14 +356,14 @@ def letterbox_image(img, target_width, target_height):
 
 def run_yolo_np_bgr(img_bgr: np.ndarray):
     if not model:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="모델을 사용할 수 없습니다.")
+        raise HTTPException(status_code=503, detail="모델을 사용할 수 없습니다.")
 
-    # img_bgr는 이미 (MODEL_H, MODEL_W) 레터박스 상태라고 가정
-    results = model(img_bgr, imgsz=(MODEL_W, MODEL_H), conf=0.1, verbose=False)[0]
+    h, w = img_bgr.shape[:2]
+    # imgsz는 (w, h)로 일치시킴
+    results = model(img_bgr, imgsz=(w, h), conf=0.1, verbose=False)[0]
 
     analysis_results = []
-    VALID_CLASSES = {"ripe", "unripe", "freshripe", "freshunripe", "overripe", "rotten"}
-    valid_detected = False
+    VALID_CLASSES = {"ripe","unripe","freshripe","freshunripe","overripe","rotten"}
 
     if results.boxes:
         for box in results.boxes:
@@ -343,14 +372,14 @@ def run_yolo_np_bgr(img_bgr: np.ndarray):
             if cls_name not in VALID_CLASSES:
                 continue
 
-            valid_detected = True
             conf = float(box.conf.item())
             x1, y1, x2, y2 = box.xyxy[0]
+
             bbox = {
-                "x": round(x1.item() / MODEL_W, 4),
-                "y": round(y1.item() / MODEL_H, 4),
-                "width": round((x2 - x1).item() / MODEL_W, 4),
-                "height": round((y2 - y1).item() / MODEL_H, 4),
+                "x": round(x1.item() / w, 4),
+                "y": round(y1.item() / h, 4),
+                "width": round((x2 - x1).item() / w, 4),
+                "height": round((y2 - y1).item() / h, 4),
             }
             analysis_results.append({
                 "ripeness": KOREAN_CLASSES.get(cls_name, cls_name),
@@ -358,7 +387,7 @@ def run_yolo_np_bgr(img_bgr: np.ndarray):
                 "freshness": round(FRESHNESS_MAP.get(cls_name, 0.0), 3),
                 "boundingBox": bbox
             })
-    return analysis_results if valid_detected else []
+    return analysis_results
 
 # --- 🔑 인증 의존성 ---
 async def get_current_user(Authorization: str = Header(None), db: Session = Depends(get_db)):
@@ -548,9 +577,8 @@ def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int =
         raise ValueError("이미지 디코딩 실패")
     return letterbox_image(img, dst_w, dst_h)  # BGR
 
-VIDEO_FPS = 3         # 3~4 권장 (느리면 2, 빠르면 5)
-HOLD_SEC  = 1.2       # 한 이미지당 표시 시간(초) – 1.5~2.0으로 늘리면 더 천천히
-
+VIDEO_FPS = _int("VIDEO_FPS", 8)
+HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.0)
 # ---------------------------
 # 오버레이(박스/라벨) 그리기
 # ---------------------------
@@ -682,10 +710,11 @@ def create_analysis_video(
 ) -> None:
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
 
-    def set_task(status: str, **extra):
-        tasks[task_id] = {**tasks.get(task_id, {}), "status": status, **extra}
-
-    set_task("PROCESSING", result=None)
+    db = SessionLocal()
+    try:
+        set_task_db(db, task_id, status="PROCESSING", result=None)
+    finally:
+        db.close()
     print(f"[{task_id}] 비디오 생성 시작... (frames={len(frames_with_dets)})")
 
     try:
@@ -702,8 +731,6 @@ def create_analysis_video(
 
         db = SessionLocal()
         try:
-            with open(final_video_path, "rb") as f:
-                video_bytes = f.read()
             username = getattr(current_user, "nickname", None) or "unknown"
             db.add(Analysis(
                 username=username,
@@ -711,7 +738,7 @@ def create_analysis_video(
                 confidence=avg_conf,
                 freshness=freshness,
                 video_path=f"/results/{final_video_path.name}",
-                video_blob=video_bytes,
+                video_blob=None,
                 created_at=datetime.now(timezone("Asia/Seoul")),
             ))
             db.commit()
@@ -719,10 +746,17 @@ def create_analysis_video(
         finally:
             db.close()
 
-        set_task("SUCCESS", result=f"/results/{final_video_path.name}")
-        print(f"[{task_id}] ✅ 최종 비디오 생성 성공.")
+        db = SessionLocal()
+        try:
+            set_task_db(db, task_id, status="SUCCESS", result=f"/results/{final_video_path.name}")
+        finally:
+            db.close()
     except Exception as e:
-        set_task("FAILURE", result=str(e))
+        db = SessionLocal()
+        try:
+            set_task_db(db, task_id, status="FAILURE", result=str(e))
+        finally:
+            db.close()
         print(f"[{task_id}] ❌ 비디오 생성 실패:", repr(e))
 
 # --- 동영상 스트리밍 함수 ---
@@ -794,7 +828,12 @@ async def start_video_analysis(
         raise HTTPException(status_code=413, detail=f"이미지는 최대 {MAX_FILES}장까지 업로드 가능합니다.")
 
     task_id = str(uuid.uuid4())
-    tasks[task_id] = {"status": "PENDING", "result": None, "image_results": []}
+
+    db = SessionLocal()
+    try:
+        set_task_db(db, task_id, status="PENDING", result=None, image_results=[])
+    finally:
+        db.close()
 
     frames_with_dets: list[tuple[np.ndarray, list]] = []   # [(resized_bgr, detections)]
     image_results = []
@@ -827,7 +866,11 @@ async def start_video_analysis(
             })
 
     # 프론트에서 바로 썸네일에 박스/정확도 표시 가능
-    tasks[task_id]["image_results"] = image_results
+    db = SessionLocal()
+    try:
+        set_task_db(db, task_id, image_results=image_results)
+    finally:
+        db.close()
 
     if frames_with_dets:
         threading.Thread(
@@ -835,14 +878,23 @@ async def start_video_analysis(
             args=(current_user, task_id, frames_with_dets), daemon=True
         ).start()
     else:
-        tasks[task_id] = {"status": "FAILURE", "result": "유효한 이미지가 없습니다.", "image_results": image_results}
+        db = SessionLocal()
+        try:
+            set_task_db(db, task_id, status="FAILURE", result="유효한 이미지가 없습니다.", image_results=image_results)
+        finally:
+            db.close()
 
     return {"task_id": task_id, "results": image_results}
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
 @task_router.get("/{task_id}/status")
 async def get_task_status(task_id: str, request: Request):
-    task = tasks.get(task_id)
+    db = SessionLocal()
+    try:
+        task = get_task_db(db, task_id)
+    finally:
+        db.close()
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -1029,15 +1081,6 @@ def get_summary_stats():
     finally:
         db.close()
 
-# 앱 시작 시 자동 통계 갱신
-@app.on_event("startup")
-def generate_today_stats():
-    db = SessionLocal()
-    try:
-        update_daily_analysis_stat(db, datetime.now(KST).date())
-    finally:
-        db.close()  
-
 # 서버 제한값을 환경변수화 + 프론트에 자동 전파
 
 def _int(name, default): return int(os.getenv(name, str(default)))
@@ -1048,11 +1091,11 @@ def get_settings():
     return {
         "MODEL_W": _int("MODEL_W", 640),
         "MODEL_H": _int("MODEL_H", 480),
-        "MAX_FILES": _int("MAX_FILES", 20),          # 0이면 무제한으로 해석
-        "MAX_BYTES": _int("MAX_BYTES", 10*1024*1024),# 0이면 무제한
-        "VIDEO_FPS": _int("VIDEO_FPS", 8),
+        "MAX_FILES": _int("MAX_FILES", 20),
+        "MAX_BYTES": _int("MAX_BYTES", 10*1024*1024),
+        "VIDEO_FPS": VIDEO_FPS,          # ← 변수 사용
         "INFER_EVERY_N_FRAMES": _int("INFER_EVERY_N_FRAMES", 10),
-        "SECONDS_PER_IMAGE": _float("SECONDS_PER_IMAGE", 1.0),
+        "SECONDS_PER_IMAGE": HOLD_SEC,   # ← 변수 사용
     }
 # --- 최종 라우터 등록 ---
 app.include_router(auth_router,      prefix="/auth")
