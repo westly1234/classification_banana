@@ -300,7 +300,7 @@ export default function Analyze() {
                 <img
                   src={mainViewerUrl}
                   alt="Main view"
-                  className="w-full h-full object-contain rounded-lg"
+                  className="max-h-[400px] w-auto object-contain rounded-lg"
                 />
               ))}
 
