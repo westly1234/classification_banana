@@ -70,22 +70,66 @@ export default function Analyze() {
     }
   }, []);
 
-  const stripRef = useRef<HTMLDivElement | null>(null);
-  const [stripH, setStripH] = useState<number>(0);
+  const leftColRef = useRef<HTMLDivElement | null>(null);
+  const [leftColH, setLeftColH] = useState<number>(0);
 
   useLayoutEffect(() => {
-    if (!stripRef.current) return;
-
+    if (!leftColRef.current) return;
     const measure = () => {
-      setStripH(Math.round(stripRef.current!.getBoundingClientRect().height)); // 패딩/보더 포함
+      setLeftColH(Math.round(leftColRef.current!.getBoundingClientRect().height));
     };
     measure();
-
-    const ro = new ResizeObserver(() => measure());
-    ro.observe(stripRef.current);
-
+    const ro = new ResizeObserver(measure);
+    ro.observe(leftColRef.current);
     window.addEventListener('resize', measure);
     return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
+  }, []);
+
+  const imgWrapRef = useRef<HTMLDivElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [imgOverlay, setImgOverlay] = useState({offX:0, offY:0, drawW:0, drawH:0});
+
+  useLayoutEffect(() => {
+    const calc = () => {
+      if (!imgWrapRef.current || !imgRef.current) return;
+      const wrap = imgWrapRef.current.getBoundingClientRect();
+      const naturalW = imgRef.current.naturalWidth || 1;
+      const naturalH = imgRef.current.naturalHeight || 1;
+      const wrapAR = wrap.width / wrap.height;
+      const imgAR = naturalW / naturalH;
+
+      // object-contain 계산
+      let drawW = 0, drawH = 0, offX = 0, offY = 0;
+      if (imgAR > wrapAR) {
+        // 좌우가 딱 맞고 상하 레터박스
+        drawW = wrap.width;
+        drawH = wrap.width / imgAR;
+        offX = 0;
+        offY = (wrap.height - drawH) / 2;
+      } else {
+        // 상하가 딱 맞고 좌우 레터박스
+        drawH = wrap.height;
+        drawW = wrap.height * imgAR;
+        offY = 0;
+        offX = (wrap.width - drawW) / 2;
+      }
+      setImgOverlay({offX, offY, drawW, drawH});
+    };
+
+    const ro1 = new ResizeObserver(calc);
+    const ro2 = new ResizeObserver(calc);
+    if (imgWrapRef.current) ro1.observe(imgWrapRef.current);
+    if (imgRef.current) ro2.observe(imgRef.current);
+
+    window.addEventListener('resize', calc);
+    // 이미지 로드 완료 후도 1회 계산
+    imgRef.current?.addEventListener('load', calc);
+
+    return () => {
+      ro1.disconnect(); ro2.disconnect();
+      window.removeEventListener('resize', calc);
+      imgRef.current?.removeEventListener('load', calc);
+    };
   }, []);
 
   const makeObjectUrl = (file: File) => URL.createObjectURL(file);
@@ -311,19 +355,31 @@ export default function Analyze() {
                     loop
                     width="100%"
                     height="100%"
-                    onError={(e) => {
+                    onError={(e: any) => {
                       console.error('video load error', e);
                       setTaskStatus('비디오 로드 실패 (네트워크/URL 확인)');
                     }}
                   />
                 </div>
               ) : (
-                <img
-                  src={mainViewerUrl}
-                  alt="Main view"
-                  className="max-h-[400px] w-auto object-contain rounded-lg"
-                />
-              ))}
+                // 이미지 + 박스
+                <div ref={imgWrapRef} className="relative w-full flex justify-center items-center">
+                  <img
+                    ref={imgRef}
+                    src={mainViewerUrl}
+                    alt="Main view"
+                    className="max-h-[500px] w-auto object-contain rounded-lg"
+                    style={{
+                      left: imgOverlay.offX,
+                      top: imgOverlay.offY,
+                      width: imgOverlay.drawW,
+                      height: imgOverlay.drawH,
+                    }}
+                  />
+                </div>
+
+              ))
+            }
 
             {taskStatus && !videoUrl && (
               <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center text-white z-10 p-4">
@@ -334,7 +390,7 @@ export default function Analyze() {
           </motion.div>
 
           {/* 썸네일 스트립 */}
-          <div ref={stripRef} className="bg-white rounded-2xl shadow-lg p-4">
+          <div ref={leftColRef} className="lg:col-span-8 xl:col-span-9 bg-white flex flex-col gap-6">
             <div className="flex items-center gap-2 mb-2">
               <Files className="w-5 h-5 text-slate-500" />
               <h3 className="text-sm sm:text-md font-bold text-slate-700">
@@ -413,7 +469,7 @@ export default function Analyze() {
         </div>
 
         {/* 제어판 */}
-        <aside className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start overflow-auto" style={{ minHeight: stripH || undefined }}>
+        <aside className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start overflow-auto" style={{ minHeight: leftColH || undefined }}>
           <h2 className="text-lg sm:text-2xl font-bold text-slate-900 mb-3">제어판</h2>
           <div
             {...getRootProps()}

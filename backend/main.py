@@ -749,7 +749,7 @@ def get_result_file(filename: str):
     return FileResponse(
         candidate,
         media_type="video/mp4",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Accept-Ranges": "bytes",  "X-Content-Type-Options": "nosniff"}
     )
 
 # --- 분석 라우터 (모든 API에 인증 필요) ---
