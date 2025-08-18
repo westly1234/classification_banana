@@ -42,6 +42,7 @@ export default function Analyze() {
   const [mainViewerUrl, setMainViewerUrl] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const [serverSettings, setServerSettings] = useState<ServerSettings | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -167,6 +168,10 @@ export default function Analyze() {
     setTaskStatus(null);
     sessionStorage.removeItem('lastVideoUrl');
 
+    if (!activeId) {
+      setActiveId(newStates[0].id);
+      setMainViewerUrl(newStates[0].previewUrl);
+    }
     setAnalysisStates(prev => {
       const combined = [...prev, ...newStates];
       if (!mainViewerUrl || prev.length === 0) {
@@ -174,7 +179,7 @@ export default function Analyze() {
       }
       return combined;
     });
-  }, [mainViewerUrl]);
+  }, [mainViewerUrl, activeId]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -199,6 +204,7 @@ export default function Analyze() {
   };
 
   const analyzeSingleImage = async (targetState: AnalysisState) => {
+    setActiveId(targetState.id);  
     setMainViewerUrl(targetState.previewUrl);
     setAnalysisStates(prev =>
       prev.map(s => (s.id === targetState.id ? { ...s, isLoading: true, error: null } : s))
@@ -254,6 +260,7 @@ export default function Analyze() {
         );
         setTaskStatus('동영상 생성 중...');
         setMainViewerUrl(null);
+        setActiveId(null); 
         pollRef.current = window.setInterval(async () => {
           try {
             const { data } = await api.get(`/tasks/${task_id}/status`);
@@ -310,6 +317,10 @@ export default function Analyze() {
       const removed = prev.filter(s => s.isSelected);
       removed.forEach(s => { try { URL.revokeObjectURL(s.previewUrl); } catch {} });
       const kept = prev.filter(s => !s.isSelected);
+      if (!kept.some(s => s.id === activeId)) {
+        setActiveId(kept[0]?.id ?? null);
+        setMainViewerUrl(kept[0]?.previewUrl ?? null);
+      }
       if (mainViewerUrl && !kept.some(s => s.previewUrl === mainViewerUrl)) {
         setMainViewerUrl(kept[0]?.previewUrl || null);
       }
@@ -319,7 +330,7 @@ export default function Analyze() {
 
   const hasSelectedItems = analysisStates.some(s => s.isSelected);
 
-  const selected = analysisStates.find(s => s.previewUrl === mainViewerUrl);
+  const selected = analysisStates.find(s => s.id === activeId) || null;
   const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
   const hasMedia = analysisStates.length > 0 || Boolean(mainViewerUrl || videoUrl);
 
@@ -438,7 +449,11 @@ export default function Analyze() {
               {analysisStates.map(state => (
                 <div
                   key={state.id}
-                  onClick={() => !isAnalyzing && setMainViewerUrl(state.previewUrl)}
+                  onClick={() => {
+                    if (isAnalyzing) return;
+                    setActiveId(state.id);
+                    setMainViewerUrl(state.previewUrl);
+                  }}
                   className={`relative flex-shrink-0 w-36 h-40 sm:w-40 sm:h-44 md:w-44 md:h-48 rounded-xl overflow-hidden cursor-pointer group border-2 ${
                     mainViewerUrl === state.previewUrl
                       ? 'border-indigo-500'
@@ -507,7 +522,7 @@ export default function Analyze() {
 
         {/* 제어판 */}
         <aside
-          className={`lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col ${
+          className={`lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start ${
             hasMedia ? 'self-start overflow-auto' : ''         // 긴 모드일 때만 고정/스크롤
           }`}
           style={hasMedia ? { minHeight: leftColH || undefined } : undefined}  // ✅ 이미지 있을 때만 높이 맞추기
@@ -515,9 +530,7 @@ export default function Analyze() {
           <h2 className="text-lg sm:text-2xl font-bold text-slate-900 mb-3">제어판</h2>
           <div
             {...getRootProps()}
-            className={`flex-grow border-2 border-dashed rounded-xl p-6 text-center flex flex-col justify-center items-center cursor-pointer transition-all duration-300 ${
-              isDragActive ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 hover:border-indigo-400'
-            }`}
+            className={`${hasMedia ? 'flex-grow' : ''} border-2 border-dashed rounded-xl p-6 text-center flex flex-col justify-center items-center cursor-pointer transition-all duration-300 ${isDragActive ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 hover:border-indigo-400'}`}
           >
             <input {...getInputProps()} />
             <UploadCloud className="w-12 h-12 mx-auto mb-2 text-slate-400" />
