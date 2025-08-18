@@ -71,7 +71,7 @@ export default function Analyze() {
   }, []);
 
   const leftColRef = useRef<HTMLDivElement | null>(null);
-  const [leftColH, setLeftColH] = useState<number>(0);
+  const [leftColH, setLeftColH] = useState(0);
 
   useLayoutEffect(() => {
     if (!leftColRef.current) return;
@@ -83,11 +83,11 @@ export default function Analyze() {
     ro.observe(leftColRef.current);
     window.addEventListener('resize', measure);
     return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
-  }, []);
+  }, []); // 의존성 비워도 ResizeObserver가 계속 반영
 
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
-  const [imgOverlay, setImgOverlay] = useState({offX:0, offY:0, drawW:0, drawH:0});
+  const [imgOverlay, setImgOverlay] = useState<{offX: number, offY: number, drawW: number, drawH: number} | null>(null);
 
   useLayoutEffect(() => {
     const calc = () => {
@@ -311,6 +311,7 @@ export default function Analyze() {
 
   const selected = analysisStates.find(s => s.previewUrl === mainViewerUrl);
   const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
+  const hasMedia = analysisStates.length > 0 || Boolean(mainViewerUrl || videoUrl);
 
   return (
     <div className="bg-slate-50 min-h-screen flex flex-col font-sans">
@@ -369,11 +370,20 @@ export default function Analyze() {
                     src={mainViewerUrl}
                     alt="Main view"
                     className="max-h-[500px] w-auto object-contain rounded-lg"
-                    style={{
-                      left: imgOverlay.offX,
-                      top: imgOverlay.offY,
-                      width: imgOverlay.drawW,
-                      height: imgOverlay.drawH,
+                    style={
+                      imgOverlay && imgOverlay.drawW > 0 && imgOverlay.drawH > 0
+                        ? {
+                            position: 'absolute',
+                            left: imgOverlay.offX,
+                            top: imgOverlay.offY,
+                            width: imgOverlay.drawW,
+                            height: imgOverlay.drawH,
+                          }
+                        : undefined
+                    }
+                    onLoad={() => {
+                      // 여기서 imgRef.current / imgWrapRef.current로
+                      // offX/offY/drawW/drawH 계산 후 setImgOverlay(...)
                     }}
                   />
                 </div>
@@ -469,7 +479,12 @@ export default function Analyze() {
         </div>
 
         {/* 제어판 */}
-        <aside className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start overflow-auto" style={{ minHeight: leftColH || undefined }}>
+        <aside
+          className={`lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col ${
+            hasMedia ? 'self-start overflow-auto' : ''         // 긴 모드일 때만 고정/스크롤
+          }`}
+          style={hasMedia ? { minHeight: leftColH || undefined } : undefined}  // ✅ 이미지 있을 때만 높이 맞추기
+        >
           <h2 className="text-lg sm:text-2xl font-bold text-slate-900 mb-3">제어판</h2>
           <div
             {...getRootProps()}
