@@ -408,7 +408,7 @@ export default function Analyze() {
         </div>
 
         {/* 제어판 */}
-        <aside className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start h-auto" style={{ minHeight: stripH || undefined }}>
+        <aside className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start overflow-auto" style={{ minHeight: stripH || undefined }}>
           <h2 className="text-lg sm:text-2xl font-bold text-slate-900 mb-3">제어판</h2>
           <div
             {...getRootProps()}
