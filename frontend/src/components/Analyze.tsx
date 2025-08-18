@@ -75,62 +75,69 @@ export default function Analyze() {
 
   useLayoutEffect(() => {
     if (!leftColRef.current) return;
-    const measure = () => {
+    const measure = () =>
       setLeftColH(Math.round(leftColRef.current!.getBoundingClientRect().height));
-    };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(leftColRef.current);
     window.addEventListener('resize', measure);
     return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
-  }, []); // 의존성 비워도 ResizeObserver가 계속 반영
+  }, []);
 
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
-  const [imgOverlay, setImgOverlay] = useState<{offX: number, offY: number, drawW: number, drawH: number} | null>(null);
+  const [imgOverlay, setImgOverlay] = useState<{
+    offX: number; offY: number; drawW: number; drawH: number;
+  } | null>(null);
 
+  // ✅ 컴포넌트 스코프에 선언 (JSX에서도 사용 가능)
+  const calcOverlay = useCallback(() => {
+    if (!imgWrapRef.current || !imgRef.current) return;
+
+    const wrap = imgWrapRef.current.getBoundingClientRect();
+    const naturalW = imgRef.current.naturalWidth || 1;
+    const naturalH = imgRef.current.naturalHeight || 1;
+
+    const wrapAR = wrap.width / wrap.height;
+    const imgAR = naturalW / naturalH;
+
+    let drawW = 0, drawH = 0, offX = 0, offY = 0;
+    if (imgAR > wrapAR) {
+      // 좌우 꽉, 상하 레터박스
+      drawW = wrap.width;
+      drawH = wrap.width / imgAR;
+      offX = 0;
+      offY = (wrap.height - drawH) / 2;
+    } else {
+      // 상하 꽉, 좌우 레터박스
+      drawH = wrap.height;
+      drawW = wrap.height * imgAR;
+      offY = 0;
+      offX = (wrap.width - drawW) / 2;
+    }
+    setImgOverlay({ offX, offY, drawW, drawH });
+  }, []);
+
+  // ✅ 관찰자/리스너 세팅
   useLayoutEffect(() => {
-    const calc = () => {
-      if (!imgWrapRef.current || !imgRef.current) return;
-      const wrap = imgWrapRef.current.getBoundingClientRect();
-      const naturalW = imgRef.current.naturalWidth || 1;
-      const naturalH = imgRef.current.naturalHeight || 1;
-      const wrapAR = wrap.width / wrap.height;
-      const imgAR = naturalW / naturalH;
+    const roWrap = new ResizeObserver(() => calcOverlay());
+    if (imgWrapRef.current) roWrap.observe(imgWrapRef.current);
 
-      // object-contain 계산
-      let drawW = 0, drawH = 0, offX = 0, offY = 0;
-      if (imgAR > wrapAR) {
-        // 좌우가 딱 맞고 상하 레터박스
-        drawW = wrap.width;
-        drawH = wrap.width / imgAR;
-        offX = 0;
-        offY = (wrap.height - drawH) / 2;
-      } else {
-        // 상하가 딱 맞고 좌우 레터박스
-        drawH = wrap.height;
-        drawW = wrap.height * imgAR;
-        offY = 0;
-        offX = (wrap.width - drawW) / 2;
-      }
-      setImgOverlay({offX, offY, drawW, drawH});
-    };
+    const imgEl = imgRef.current;
+    const onLoad = () => calcOverlay();
+    imgEl?.addEventListener('load', onLoad);
 
-    const ro1 = new ResizeObserver(calc);
-    const ro2 = new ResizeObserver(calc);
-    if (imgWrapRef.current) ro1.observe(imgWrapRef.current);
-    if (imgRef.current) ro2.observe(imgRef.current);
+    window.addEventListener('resize', calcOverlay);
 
-    window.addEventListener('resize', calc);
-    // 이미지 로드 완료 후도 1회 계산
-    imgRef.current?.addEventListener('load', calc);
+    // 최초 1회 계산
+    calcOverlay();
 
     return () => {
-      ro1.disconnect(); ro2.disconnect();
-      window.removeEventListener('resize', calc);
-      imgRef.current?.removeEventListener('load', calc);
+      roWrap.disconnect();
+      window.removeEventListener('resize', calcOverlay);
+      imgEl?.removeEventListener('load', onLoad);
     };
-  }, []);
+}, [calcOverlay]);
 
   const makeObjectUrl = (file: File) => URL.createObjectURL(file);
 
@@ -373,26 +380,43 @@ export default function Analyze() {
                     src={mainViewerUrl}
                     alt="Main view"
                     className="max-h-[500px] w-auto object-contain rounded-lg"
-                    style={
-                      imgOverlay && imgOverlay.drawW > 0 && imgOverlay.drawH > 0
-                        ? {
-                            position: 'absolute',
-                            left: imgOverlay.offX,
-                            top: imgOverlay.offY,
-                            width: imgOverlay.drawW,
-                            height: imgOverlay.drawH,
-                          }
-                        : undefined
-                    }
-                    onLoad={() => {
-                      // 여기서 imgRef.current / imgWrapRef.current로
-                      // offX/offY/drawW/drawH 계산 후 setImgOverlay(...)
-                    }}
+                    onLoad={calcOverlay}
                   />
+                  {imgOverlay && selected?.result && (
+                    <div
+                      className="absolute pointer-events-none"
+                      style={{
+                        left: imgOverlay.offX,
+                        top: imgOverlay.offY,
+                    width: imgOverlay.drawW,
+                    height: imgOverlay.drawH,
+                  }}
+                >
+                  {selected.result.map((det, i) => {
+                    const l = det.boundingBox;
+                    const x = l.x * imgOverlay.drawW;
+                    const y = l.y * imgOverlay.drawH;
+                    const w = l.width * imgOverlay.drawW;
+                    const h = l.height * imgOverlay.drawH;
+                    return (
+                      <div
+                        key={i}
+                        style={{
+                          position: 'absolute',
+                          left: x, top: y, width: w, height: h,
+                          border: '3px solid #FACC15', borderRadius: 2,
+                        }}
+                      >
+                        <div className="absolute -top-6 left-0 bg-black/80 text-white text-xs px-1.5 rounded">
+                          {det.ripeness} {(det.confidence * 100).toFixed(1)}%
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-
-              ))
-            }
+              )}
+            </div>
+          ))}
 
             {taskStatus && !videoUrl && (
               <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center text-white z-10 p-4">
