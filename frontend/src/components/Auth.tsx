@@ -25,17 +25,18 @@ export default function AuthPage() {
     try {
       if (isLoginView) {
         // 🔐 로그인 (x-www-form-urlencoded)
-        const params = new URLSearchParams();
-        params.append("username", email);
-        params.append("password", password);
+        const form = new URLSearchParams();
+        form.append("username", email);
+        form.append("password", password);
 
-        const res = await api.post("/auth/login", params);
-        await api.post("/auth/login", { nickname, email, password, password_confirm: confirmPassword });
+        const res = await api.post("/auth/login", form, {
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        });
 
         const token = res.data.access_token;
-        login(token);
-        navigate(from, { replace: true });
-        return; // finally에서 loading 해제
+            login(token);
+            navigate(from, { replace: true });
+        return;
       }
 
       // 📝 회원가입
@@ -51,11 +52,21 @@ export default function AuthPage() {
       alert("이메일 인증 링크가 발송되었습니다. 메일을 확인해주세요.");
       setIsLoginView(true);
     } catch (err: any) {
-      console.error("❌ 요청 실패:", err.response?.data || err);
-      setError(err.response?.data?.detail || "요청 처리 중 오류가 발생했습니다.");
-    } finally {
-      setLoading(false);
+    console.error("❌ 요청 실패:", err?.response?.data || err);
+
+    let msg = "요청 처리 중 오류가 발생했습니다.";
+    const d = err?.response?.data?.detail;
+
+    if (typeof d === "string") msg = d;
+    else if (Array.isArray(d)) {
+        msg = d.map((e: any) =>
+        [e?.loc?.join?.(".") ?? "", e?.msg ?? ""].filter(Boolean).join(": ")
+        ).join("\n");
+    } else if (err?.message) msg = err.message;
+
+    setError(msg);
     }
+
   };
 
     return (
