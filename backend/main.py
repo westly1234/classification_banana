@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import os, asyncio, concurrent.futures, base64, uuid, threading, time, smtplib, pytz, cv2, torch, numpy as np
+import os, asyncio, concurrent.futures, base64, uuid, threading, time, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -540,7 +540,6 @@ def update_daily_analysis_stat(db: Session, target_date: date):
     db.commit() 
 
 # --- 📹 비동기 작업 및 동영상 생성 ---
-
 def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int = TARGET_H) -> np.ndarray:
     """빠른 디코딩 + 레터박스 (BGR 반환)"""
     arr = np.frombuffer(img_bytes, np.uint8)
@@ -548,7 +547,48 @@ def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int =
     if img is None:
         raise ValueError("이미지 디코딩 실패")
     return letterbox_image(img, dst_w, dst_h)  # BGR
+# --- ffmpeg 파이프 헬퍼 추가 ---
+class FFMpegPipeWriter:
+    def __init__(self, path: str, w: int, h: int, fps: int):
+        if not shutil.which("ffmpeg"):
+            raise RuntimeError("ffmpeg not found in PATH")
+        self.path = path
+        self.w, self.h, self.fps = w, h, fps
+        # bgr24 → libx264, yuv420p, faststart (브라우저 호환 최고)
+        self.proc = subprocess.Popen(
+            [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-pix_fmt", "bgr24",
+                "-s", f"{w}x{h}",
+                "-r", str(fps),
+                "-i", "pipe:0",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-preset", "veryfast",
+                "-crf", "23",
+                self.path,
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if self.proc.stdin is None:
+            raise RuntimeError("failed to open ffmpeg stdin")
 
+    def write(self, frame_bgr):
+        # frame shape: (h, w, 3), dtype=uint8
+        self.proc.stdin.write(frame_bgr.tobytes())
+
+    def release(self):
+        try:
+            if self.proc and self.proc.stdin:
+                self.proc.stdin.close()
+        finally:
+            if self.proc:
+                self.proc.wait(timeout=30)
+                
 def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarray]):
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
 
@@ -564,6 +604,8 @@ def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarra
     # (B) 코덱 폴백 시도
     fourcc_candidates = ["avc1", "mp4v", "XVID", "MJPG"]
     writer = None
+    using_ffmpeg = False
+
     for cc in fourcc_candidates:
         fourcc = cv2.VideoWriter_fourcc(*cc)
         wr = cv2.VideoWriter(str(final_video_path), fourcc, VIDEO_FPS, (w, h))
@@ -573,10 +615,12 @@ def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarra
             break
         else:
             wr.release()
+
+    # OpenCV가 전부 실패하면: ffmpeg 파이프 사용
     if writer is None:
-        set_task("FAILURE", result="VideoWriter 초기화 실패(코덱)")
-        print(f"[{task_id}] VideoWriter open failed for all codecs")
-        return
+        print(f"[{task_id}] OpenCV VideoWriter failed for all codecs; fallback to ffmpeg pipe (libx264)")
+        writer = FFMpegPipeWriter(str(final_video_path), w, h, VIDEO_FPS)
+        using_ffmpeg = True
     
     # YOLO warmup: 콜드스타트로 첫 프레임에서 버벅이는 것 방지
     if model:
@@ -636,7 +680,12 @@ def create_analysis_video(current_user, task_id: str, frames_bgr: list[np.ndarra
                 # 진행률 로그 (선택: 클라이언트에 progress도 내려주려면 tasks에 저장)
                 print(f"[{task_id}] progress {i}/{total_frames}")
 
-        writer.release(); writer = None
+        if using_ffmpeg:
+            writer.release()
+            writer = None
+        else:
+            writer.release()
+            writer = None
 
         # 생성 검증
         if not final_video_path.exists() or final_video_path.stat().st_size == 0:
