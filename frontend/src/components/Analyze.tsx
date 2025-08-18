@@ -1,5 +1,5 @@
 // src/components/Analyze.tsx
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useLayoutEffect, useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { YoloAnalysisResult, ImageAnalysisResultPayload } from '../types';
@@ -63,10 +63,29 @@ export default function Analyze() {
   useEffect(() => {
     const savedVideoUrl = sessionStorage.getItem('lastVideoUrl');
     if (savedVideoUrl) {
-      setVideoUrl(savedVideoUrl);
-      setMainViewerUrl(savedVideoUrl);
+      const withTs = `${savedVideoUrl}?t=${Date.now()}`;
+      setVideoUrl(withTs);
+      setMainViewerUrl(withTs);
       setTaskStatus('이전 동영상 분석 결과를 불러왔습니다.');
     }
+  }, []);
+
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const [stripH, setStripH] = useState<number>(0);
+
+  useLayoutEffect(() => {
+    if (!stripRef.current) return;
+
+    const measure = () => {
+      setStripH(Math.round(stripRef.current!.getBoundingClientRect().height)); // 패딩/보더 포함
+    };
+    measure();
+
+    const ro = new ResizeObserver(() => measure());
+    ro.observe(stripRef.current);
+
+    window.addEventListener('resize', measure);
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
   }, []);
 
   const makeObjectUrl = (file: File) => URL.createObjectURL(file);
@@ -196,7 +215,7 @@ export default function Analyze() {
                 setVideoUrl(finalUrl);
                 setMainViewerUrl(finalUrl);
                 sessionStorage.setItem('lastVideoUrl', finalUrl);
-                setTaskStatus('동영상 생성 완료!');
+                setTaskStatus(null);
                 resolve();
               } else {
                 setTaskStatus(`오류: 동영상 생성 실패`);
@@ -283,6 +302,7 @@ export default function Analyze() {
                 // ✅ react-player로 교체 (캐시 방지 쿼리 유지)
                 <div className="w-full h-full max-h-[500px]">
                   <ReactPlayer
+                    key={mainViewerUrl || ''}
                     url={`${mainViewerUrl}?t=${Date.now()}`}
                     controls
                     playing={false}
@@ -309,7 +329,7 @@ export default function Analyze() {
           </motion.div>
 
           {/* 썸네일 스트립 */}
-          <div className="bg-white rounded-2xl shadow-lg p-4">
+          <div ref={stripRef} className="bg-white rounded-2xl shadow-lg p-4">
             <div className="flex items-center gap-2 mb-2">
               <Files className="w-5 h-5 text-slate-500" />
               <h3 className="text-sm sm:text-md font-bold text-slate-700">
@@ -388,7 +408,7 @@ export default function Analyze() {
         </div>
 
         {/* 제어판 */}
-        <aside className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start h-auto">
+        <aside className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col self-start h-auto" style={{ minHeight: stripH || undefined }}>
           <h2 className="text-lg sm:text-2xl font-bold text-slate-900 mb-3">제어판</h2>
           <div
             {...getRootProps()}
