@@ -262,8 +262,8 @@ export default function Analyze() {
             className={
               "bg-white rounded-2xl shadow-lg flex items-center justify-center relative overflow-hidden p-2 " +
               (hasDetectionsInSelected
-                ? "min-h-[420px] sm:min-h-[560px] md:min-h-[680px]"   // 결과 크~게
-                : "min-h-[240px] sm:min-h-[300px] md:min-h-[360px]")  // 미리보기 작게
+                ? "min-h-[240px] sm:min-h-[320px] md:min-h-[400px]"   // 결과 크~게
+                : "min-h-[240px] sm:min-h-[350px] md:min-h-[420px]")  // 미리보기 작게
             }
           >
             <AnimatePresence>
