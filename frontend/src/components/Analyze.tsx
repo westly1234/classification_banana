@@ -76,6 +76,7 @@ export default function Analyze() {
   const [imgOverlay, setImgOverlay] = useState<{
     offX: number; offY: number; drawW: number; drawH: number;
   } | null>(null);
+  const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
   // ✅ 컴포넌트 스코프에 선언 (JSX에서도 사용 가능)
   const calcOverlay = useCallback(() => {
@@ -471,11 +472,15 @@ export default function Analyze() {
                       }}
                     >
                   {selected.result.map((det, i) => {
-                    const l = det.boundingBox;
-                    const x = l.x * imgOverlay.drawW;
-                    const y = l.y * imgOverlay.drawH;
-                    const w = l.width * imgOverlay.drawW;
-                    const h = l.height * imgOverlay.drawH;
+                    const b = det.boundingBox;
+                    const nx = clamp01(b.x);
+                    const ny = clamp01(b.y);
+                    const nw = Math.max(0, Math.min(1 - nx, b.width));
+                    const nh = Math.max(0, Math.min(1 - ny, b.height));
+                    const x = nx * imgOverlay.drawW;
+                    const y = ny * imgOverlay.drawH;
+                    const w = nw * imgOverlay.drawW;
+                    const h = nh * imgOverlay.drawH;
                     return (
                       <div
                         key={i}
@@ -589,15 +594,16 @@ export default function Analyze() {
 
         {/* 제어판 */}
         <aside
-          className={`lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6 flex flex-col
-                      ${hasMedia ? 'sticky top-6 overflow-auto max-h-[85vh]' : ''}`}
-          style={hasMedia ? { minHeight: leftColH || undefined } : undefined}
-        >
+          className="lg:col-span-4 xl:col-span-3 bg-white rounded-2xl shadow-lg p-4 sm:p-6
+                    flex flex-col sticky top-6 overflow-auto
+                    max-h-[calc(100vh-1.5rem)]">
           <h2 className="text-lg sm:text-2xl font-bold text-slate-900 mb-3">제어판</h2>
           <div
             {...getRootProps()}
-            className={`${hasMedia ? 'flex-grow' : ''} border-2 border-dashed rounded-xl p-6 text-center flex flex-col justify-center items-center cursor-pointer transition-all duration-300 ${isDragActive ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 hover:border-indigo-400'}`}
-          >
+            className={`flex-1 min-h-[300px] sm:min-h-[360px] lg:min-h-[420px]
+              border-2 border-dashed rounded-xl p-6 w-full
+              text-center flex flex-col justify-center items-center cursor-pointer
+              transition-all duration-300 ${isDragActive ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 hover:border-indigo-400'}`}>
             <input {...getInputProps()} />
             <UploadCloud className="w-12 h-12 mx-auto mb-2 text-slate-400" />
             <p className="font-semibold text-slate-700">클릭 또는 드래그하여 파일 추가</p>

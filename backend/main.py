@@ -225,6 +225,7 @@ def get_db():
         yield db
     finally:
         db.close()
+
 def set_task_db(db, task_id: str, **fields):
     row = db.get(TaskStatus, task_id) 
     if row is None:
@@ -268,6 +269,8 @@ def _heavy_init():
 
     try:
         m = YOLO(MODEL_PATH)
+        m.fuse()                    # ✅ Conv+BN fuse -> CPU에서 이득
+        m.to('cpu')                 # 혹시 모를 디바이스 이동 방지
         globals()["model"] = m
         MODEL_READY = True
         print("✅ YOLO loaded")
@@ -362,8 +365,19 @@ def run_yolo_np_bgr(img_bgr: np.ndarray):
     # imgsz는 (w, h)로 일치시킴
     results = model(img_bgr, imgsz=(w, h), conf=0.1, verbose=False)[0]
 
-    analysis_results = []
+    out = []
     VALID_CLASSES = {"ripe","unripe","freshripe","freshunripe","overripe","rotten"}
+
+    with torch.inference_mode():
+        results = model(
+            img_bgr,
+            imgsz=(w, h),
+            conf=0.25,           # 너무 낮으면 박스 많아져서 느려짐
+            iou=0.5,
+            max_det=8,           # ✅ 최대 박스 수 제한
+            classes=None,        # (필요시) 특정 클래스만: [ids...]
+            verbose=False
+        )[0]
 
     if results.boxes:
         for box in results.boxes:
@@ -373,21 +387,31 @@ def run_yolo_np_bgr(img_bgr: np.ndarray):
                 continue
 
             conf = float(box.conf.item())
-            x1, y1, x2, y2 = box.xyxy[0]
+            x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
 
-            bbox = {
-                "x": round(x1.item() / w, 4),
-                "y": round(y1.item() / h, 4),
-                "width": round((x2 - x1).item() / w, 4),
-                "height": round((y2 - y1).item() / h, 4),
-            }
-            analysis_results.append({
+            # 1) 프레임 경계로 픽셀단 클램프
+            x1 = max(0.0, min(w - 1.0, x1))
+            y1 = max(0.0, min(h - 1.0, y1))
+            x2 = max(x1 + 1.0, min(float(w), x2))
+            y2 = max(y1 + 1.0, min(float(h), y2))
+
+            # 2) 정규화
+            nx, ny = x1 / w, y1 / h
+            nw, nh = (x2 - x1) / w, (y2 - y1) / h
+
+            # 3) 최종 [0,1] 클램프 (폭/높이는 남은 영역 안으로)
+            nx = max(0.0, min(1.0, nx))
+            ny = max(0.0, min(1.0, ny))
+            nw = max(0.0, min(1.0 - nx, nw))
+            nh = max(0.0, min(1.0 - ny, nh))
+
+            out.append({
                 "ripeness": KOREAN_CLASSES.get(cls_name, cls_name),
                 "confidence": round(conf, 3),
                 "freshness": round(FRESHNESS_MAP.get(cls_name, 0.0), 3),
-                "boundingBox": bbox
+                "boundingBox": {"x": round(nx,4), "y": round(ny,4), "width": round(nw,4), "height": round(nh,4)}
             })
-    return analysis_results
+    return out
 
 # --- 🔑 인증 의존성 ---
 async def get_current_user(Authorization: str = Header(None), db: Session = Depends(get_db)):
@@ -618,59 +642,48 @@ def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> Non
 # ---------------------------------------
 # 비디오 작성(FFmpeg 우선, OpenCV 폴백)
 # ---------------------------------------
-def write_video(
-    frames_with_dets: List[Tuple[np.ndarray, list]],
-    out_path: str,
-    fps: int = VIDEO_FPS,
-    hold_sec: float = HOLD_SEC,
-) -> None:
-    if not frames_with_dets:
-        raise ValueError("frames_with_dets is empty")
-
+def write_video(frames_with_dets, out_path, fps=3, hold_sec=1.2):
     h, w = frames_with_dets[0][0].shape[:2]
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    hold_frames = max(1, math.ceil(hold_sec * fps))
-
     using_ffmpeg = False
     proc = None
-    vw = None
 
     if shutil.which("ffmpeg"):
         try:
+            # ✅ 입력 프레임레이트 = 1/hold_sec (예: 0.8333fps) → 출력에서 fps로 업샘플
+            input_rate = 1.0 / max(hold_sec, 0.1)
+
             cmd = [
-                "ffmpeg", "-y",
-                "-loglevel", "error",           # ⬅️ 불필요한 stderr 줄이기
-                "-f", "rawvideo",
-                "-pix_fmt", "bgr24",
+                "ffmpeg","-y",
+                "-loglevel","error",
+                "-f","rawvideo",
+                "-pix_fmt","bgr24",
                 "-s", f"{w}x{h}",
-                "-r", str(fps),                 # 입력 fps
-                "-i", "-",                      # stdin
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-tune", "zerolatency",
-                "-crf", "23",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                out_path,
+                "-r", f"{input_rate}",        # ⬅️ 각 프레임의 간격을 hold_sec로 설정
+                "-i","-",
+                "-vf", f"fps={fps}",          # ⬅️ 출력 fps로 프레임 보간(복제)
+                "-c:v","libx264",
+                "-preset","ultrafast",        # ⬅️ 더 가볍게
+                "-crf","28",                  # ⬅️ 용량↑ 허용 시 더 빠름(23→28)
+                "-pix_fmt","yuv420p",
+                "-movflags","+faststart",
+                out_path
             ]
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,      # ⬅️ 파이프 막힘 방지
-                stderr=subprocess.DEVNULL,      # ⬅️ 파이프 막힘 방지
-            )
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if proc.stdin is None:
                 raise RuntimeError("failed to open ffmpeg stdin")
             using_ffmpeg = True
         except Exception as e:
-            print(f"[write_video] ffmpeg open failed: {e}; fallback to OpenCV")
+            print("[write_video] ffmpeg open failed:", e)
 
     if not using_ffmpeg:
+        # 폴백(OpenCV) – 여기서는 중복 write 필요 없음(각 프레임 1번만)
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        vw = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+        vw = cv2.VideoWriter(out_path, fourcc, 1.0/hold_sec, (w, h))  # 입력 fps=1/hold_sec
         if not vw.isOpened():
-            raise RuntimeError(f"OpenCV VideoWriter open failed (size={w}x{h}, fps={fps})")
+            raise RuntimeError("OpenCV VideoWriter open failed")
 
     try:
         for idx, (img_bgr, dets) in enumerate(frames_with_dets):
@@ -678,26 +691,18 @@ def write_video(
             draw_overlay(frame, dets, w, h)
 
             if using_ffmpeg:
-                raw = frame.tobytes()
-                for _ in range(hold_frames):
-                    proc.stdin.write(raw)
+                proc.stdin.write(frame.tobytes())  # ✅ 한 번만 write
             else:
-                for _ in range(hold_frames):
-                    vw.write(frame)
+                vw.write(frame)                     # ✅ 한 번만 write
 
             if idx % 2 == 0:
                 print(f"[write_video] progress {idx+1}/{len(frames_with_dets)}")
-
     finally:
         if using_ffmpeg:
-            try:
-                proc.stdin.close()
-            except Exception:
-                pass
-            rc = proc.wait(timeout=30)
-            if rc != 0:
-                raise RuntimeError(f"ffmpeg exited with code {rc}")
-        elif vw is not None:
+            try: proc.stdin.close()
+            except: pass
+            proc.wait(timeout=30)
+        else:
             vw.release()
 
 # -------------------------------------------------------
@@ -817,79 +822,84 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"이미지 분석 중 오류: {e}")
 
+# 상단에 한 줄
+FAST_PREVIEW = 2   # 앞의 N장만 즉시 추론 (0~2 추천)
+
 @analysis_router.post("/analyze_video")
 async def start_video_analysis(
     files: List[UploadFile] = File(...),
     current_user: User = Depends(get_current_user)
 ):
-    if not files or len(files) < 1:
+    if not files:
         raise HTTPException(status_code=400, detail="동영상 분석을 위해서는 1장 이상의 이미지가 필요합니다.")
-    if len(files) > MAX_FILES:
+    if MAX_FILES and len(files) > MAX_FILES:
         raise HTTPException(status_code=413, detail=f"이미지는 최대 {MAX_FILES}장까지 업로드 가능합니다.")
 
     task_id = str(uuid.uuid4())
-
-    # DB에 태스크 생성
-    db = SessionLocal()
-    try:
+    with SessionLocal() as db:
         set_task_db(db, task_id, status="PENDING", result=None, image_results=[])
-    finally:
-        db.close()
-
-    frames_with_dets: list[tuple[np.ndarray, list]] = []
-    image_results = []
 
     loop = asyncio.get_running_loop()
+    frames_bgr: list[np.ndarray] = []
+    image_results: list[dict] = []
 
+    # 1) 업로드 파일들 디코드만 먼저(빨리)
+    decoded: list[tuple[str, np.ndarray]] = []
     for f in files[:MAX_FILES]:
         content = await f.read()
         if not content:
             continue
-        if len(content) > MAX_BYTES:
+        if MAX_BYTES and len(content) > MAX_BYTES:
             image_results.append({
                 "filename": f.filename, "detections": [], "avg_confidence": 0,
                 "error": f"파일 용량(최대 {MAX_BYTES//1024//1024}MB) 초과"
             })
             continue
-
         try:
-            # ⬇️ CPU 작업은 전부 executor로
-            resized_bgr = await loop.run_in_executor(
-                EXECUTOR, safe_decode_and_resize, content, TARGET_W, TARGET_H
-            )
-            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, resized_bgr)
-
-            avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
-            frames_with_dets.append((resized_bgr, dets))
-            image_results.append({
-                "filename": f.filename, "detections": dets, "avg_confidence": avg_conf
-            })
+            bgr = await loop.run_in_executor(EXECUTOR, safe_decode_and_resize, content, TARGET_W, TARGET_H)
+            decoded.append((f.filename, bgr))
+            frames_bgr.append(bgr)
         except Exception as e:
-            image_results.append({
-                "filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)
-            })
+            image_results.append({"filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)})
 
-    # 썸네일 결과를 DB에 저장
-    db = SessionLocal()
-    try:
+    # 2) 앞의 FAST_PREVIEW장만 즉시 추론 → 썸네일에 바로 표시
+    for idx, (fname, bgr) in enumerate(decoded):
+        if idx < FAST_PREVIEW:
+            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr)
+            avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
+            image_results.append({"filename": fname, "detections": dets, "avg_confidence": avg_conf})
+        else:
+            # 나머지는 일단 빈 결과로 빠르게 응답
+            image_results.append({"filename": fname, "detections": [], "avg_confidence": 0})
+
+    # DB에 썸네일 결과 저장하고 즉시 200
+    with SessionLocal() as db:
         set_task_db(db, task_id, image_results=image_results)
-    finally:
-        db.close()
 
-    # 비디오 생성은 백그라운드(현재처럼) – 요청은 즉시 반환
-    if frames_with_dets:
-        threading.Thread(
-            target=create_analysis_video,
-            args=(current_user, task_id, frames_with_dets),
-            daemon=True
-        ).start()
-    else:
-        db = SessionLocal()
+    # 3) 백그라운드에서 나머지 프레임 추론 + 비디오 렌더
+    def bg_finish_and_render():
         try:
-            set_task_db(db, task_id, status="FAILURE", result="유효한 이미지가 없습니다.", image_results=image_results)
-        finally:
-            db.close()
+            # 누락된 프레임들을 순차 추론
+            filled: list[tuple[np.ndarray, list]] = []
+            name_to_dets = {r["filename"]: r for r in image_results}
+            for fname, bgr in decoded:
+                dets = name_to_dets[fname]["detections"]
+                if not dets:  # 비어있던 것만 추론
+                    d = run_yolo_np_bgr(bgr)
+                    name_to_dets[fname]["detections"] = d
+                filled.append((bgr, name_to_dets[fname]["detections"]))
 
+            # 중간 결과 갱신
+            with SessionLocal() as db:
+                set_task_db(db, task_id, status="PROCESSING", image_results=list(name_to_dets.values()))
+
+            # 비디오 생성 (draw_overlay는 서버에서)
+            create_analysis_video(current_user, task_id, filled)
+        except Exception as e:
+            with SessionLocal() as db:
+                set_task_db(db, task_id, status="FAILURE", result=str(e))
+
+    threading.Thread(target=bg_finish_and_render, daemon=True).start()
     return {"task_id": task_id, "results": image_results}
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
