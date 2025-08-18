@@ -68,7 +68,7 @@ export default function Analyze() {
   const hasSelectedItems = analysisStates.some(s => s.isSelected);
   const selected = analysisStates.find(s => s.id === activeId) || null;
   const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
-  const hasMedia = analysisStates.length > 0 || Boolean(mainViewerUrl || videoUrl);
+  // const hasMedia = analysisStates.length > 0 || Boolean(mainViewerUrl || videoUrl);
   const leftColRef = useRef<HTMLDivElement | null>(null);
   const [leftColH, setLeftColH] = useState(0);
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
