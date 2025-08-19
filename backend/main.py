@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import os, asyncio, concurrent.futures, base64, uuid, threading, math, json, time, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
+import os, re, asyncio, concurrent.futures, base64, uuid, threading, math, json, time, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -185,16 +185,19 @@ admin.add_view(UserAdmin)
 admin.add_view(AnalysisAdmin)
 
 # --- CORS 설정 ---
-FRONT_REGEX = r"^https://classification-banana.*\.onrender\.com$"
-LOCAL = "http://localhost:5173"
+FRONT_REGEX = re.compile(r"^https://classification-banana[\w\-]*\.onrender\.com$")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=FRONT_REGEX,   # ✅ 정규식
-    allow_origins=[LOCAL],            # 로컬은 정확히 지정
+    allow_origins=[
+        "http://localhost:5173",
+        "https://classification-banana-2.onrender.com",
+    ],
+    allow_origin_regex=FRONT_REGEX,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET","POST","OPTIONS"],
     allow_headers=["*"],
+    max_age=600,
 )
 
 # ✅ 세션 쿠키 보안 옵션 (SQLAdmin용)
@@ -210,6 +213,10 @@ app.add_middleware(
 # ✅ 결과 폴더
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
+
+# 작업 폴더
+TASKS_DIR = (RESULTS_DIR / "tasks")
+TASKS_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- 라우터 생성 ---
 auth_router = APIRouter(tags=["Authentication"])
@@ -407,26 +414,40 @@ def letterbox_image(img, target_width, target_height):
     new_img[top:top+nh, left:left+nw] = resized
     return new_img
 
-def run_yolo_np_bgr(imgs_bgr: List[np.ndarray], imgsz=None, conf=None, max_det=None) -> List[list]:
+def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
     """
-    여러 장을 한 번에 추론해서 list[list[det]] 형태로 반환.
-    각 det 포맷은 run_yolo_np_bgr과 동일.
+    imgs_bgr: np.ndarray (H,W,3) 또는 [np.ndarray, ...]
+    return: 단일 입력이면 [det,...], 배치면 [[det,...], [det,...], ...]
     """
     if not model:
         raise HTTPException(status_code=503, detail="모델을 사용할 수 없습니다.")
-    if not imgs_bgr:
-        return []
 
-    # 모델 호출 한 번으로 N개 이미지 처리
-    res_list = model(imgs_bgr, imgsz=(imgsz or imgs_bgr[0].shape[1]),
-                     conf=(conf or 0.1), max_det=(max_det or 100), verbose=False)
+    # --- 단일/배치 정규화 ---
+    single_input = False
+    if isinstance(imgs_bgr, np.ndarray):
+        imgs = [imgs_bgr]
+        single_input = True
+    else:
+        imgs = list(imgs_bgr)
 
-    outputs: List[list] = []
+    if not imgs:
+        return [] if not single_input else []
+
+    # 모델 호출
+    res_list = model(
+        imgs, 
+        imgsz=(imgsz or imgs[0].shape[1]), 
+        conf=(conf or 0.1), 
+        max_det=(max_det or 100), 
+        verbose=False
+    )
+
     VALID = {"ripe","unripe","freshripe","freshunripe","overripe","rotten"}
+    outputs = []
 
-    for img_bgr, res in zip(imgs_bgr, res_list):
+    for img_bgr, res in zip(imgs, res_list):
         h, w = img_bgr.shape[:2]
-        dets: list = []
+        dets = []
         for box in (res.boxes or []):
             cls = model.names[int(box.cls.item())]
             if cls not in VALID:
@@ -437,12 +458,13 @@ def run_yolo_np_bgr(imgs_bgr: List[np.ndarray], imgsz=None, conf=None, max_det=N
                 "confidence": float(box.conf.item()),
                 "freshness": round(FRESHNESS_MAP.get(cls, 0.0), 3),
                 "boundingBox": {
-                    "x": round(x1.item() / w, 4), "y": round(y1.item() / h, 4),
-                    "width": round((x2 - x1).item() / w, 4), "height": round((y2 - y1).item() / h, 4),
+                    "x": round(x1.item()/w,4), "y": round(y1.item()/h,4),
+                    "width": round((x2-x1).item()/w,4), "height": round((y2-y1).item()/h,4),
                 },
             })
         outputs.append(dets)
-    return outputs
+
+    return outputs[0] if single_input else outputs
 
 # --- 🔑 인증 의존성 ---
 async def get_current_user(Authorization: str = Header(None), db: Session = Depends(get_db)):
@@ -945,8 +967,8 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"이미지 분석 중 오류: {e}")
 
-# 상단에 한 줄
-FAST_PREVIEW = 2   # 앞의 N장만 즉시 추론 (0~2 추천)
+# 앞의 N장만 즉시 추론
+FAST_PREVIEW = 2  
 
 @analysis_router.post("/analyze_video")
 async def start_video_analysis(
@@ -960,91 +982,105 @@ async def start_video_analysis(
 
     task_id = str(uuid.uuid4())
     with SessionLocal() as db:
-        # 상태를 먼저 생성
         set_task_db(db, task_id, status="PENDING", result=None, image_results=[])
 
     loop = asyncio.get_running_loop()
 
-    # 1) 업로드 파일들 디코드만 먼저(가볍고 빠르게)
-    decoded: list[tuple[str, np.ndarray]] = []   # [(filename, bgr)]
-    image_results: list[dict] = []               # 프런트에 내려줄 썸네일 상태
+    # 0) 업로드는 최대한 빨리 디스크에만 저장 (디코드 X)
+    task_root = TASKS_DIR / task_id
+    orig_dir  = task_root / "orig"
+    orig_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest: list[dict] = []        # [{'filename':..., 'path':...}]
+    image_results: list[dict] = []   # 프론트 썸네일 상태
 
     for f in files[:MAX_FILES]:
-        content = await f.read()
-        if not content:
+        dst = orig_dir / f.filename
+        size = 0
+        with open(dst, "wb") as out:
+            while True:
+                chunk = await f.read(1024 * 1024)  # 1MB씩
+                if not chunk:
+                    break
+                size += len(chunk)
+                if MAX_BYTES and size > MAX_BYTES:
+                    out.close()
+                    dst.unlink(missing_ok=True)
+                    image_results.append({
+                        "filename": f.filename, "detections": [], "avg_confidence": 0,
+                        "error": f"파일 용량(최대 {MAX_BYTES//1024//1024}MB) 초과"
+                    })
+                    break
+                out.write(chunk)
+        await f.close()
+        if MAX_BYTES and size > MAX_BYTES:
             continue
-        if MAX_BYTES and len(content) > MAX_BYTES:
-            image_results.append({
-                "filename": f.filename, "detections": [], "avg_confidence": 0,
-                "error": f"파일 용량(최대 {MAX_BYTES//1024//1024}MB) 초과"
-            })
-            continue
+        manifest.append({"filename": f.filename, "path": str(dst)})
 
-        try:
-            bgr = await loop.run_in_executor(EXECUTOR, safe_decode_and_resize, content, TARGET_W, TARGET_H)
-            decoded.append((f.filename, bgr))
-        except Exception as e:
-            image_results.append({"filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)})
-
-    # 유효 이미지가 하나도 없으면 종료
-    if len(decoded) == 0 and all(len(r.get("detections", [])) == 0 for r in image_results):
+    if not manifest and not image_results:
         with SessionLocal() as db:
             set_task_db(db, task_id, status="FAILURE", result="유효한 이미지가 없습니다.", image_results=image_results)
         return {"task_id": task_id, "results": image_results}
 
-    # 2) 앞의 FAST_PREVIEW 장만 즉시 감지하여 바로 표시
-    for idx, (fname, bgr) in enumerate(decoded):
-        if idx < FAST_PREVIEW:
-            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr)
+    # 1) FAST_PREVIEW 만큼만 즉시 디코드+추론
+    for i, itm in enumerate(manifest):
+        if i >= FAST_PREVIEW:
+            image_results.append({"filename": itm["filename"], "detections": [], "avg_confidence": 0})
+            continue
+        try:
+            with open(itm["path"], "rb") as fp:
+                data = fp.read()
+            bgr = await loop.run_in_executor(EXECUTOR, safe_decode_and_resize, data, TARGET_W, TARGET_H)
+            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr)  # 단일도 OK
             avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
-            image_results.append({"filename": fname, "detections": dets, "avg_confidence": avg_conf})
-        else:
-            # 아직 미처리 → 빈 결과로 자리만 잡아둠(프런트는 이게 추후 채워지는 걸 폴링으로 받음)
-            image_results.append({"filename": fname, "detections": [], "avg_confidence": 0})
+            image_results.append({"filename": itm["filename"], "detections": dets, "avg_confidence": avg_conf})
+        except Exception as e:
+            image_results.append({"filename": itm["filename"], "detections": [], "avg_confidence": 0, "error": str(e)})
 
-    # 초기 썸네일 상태 저장 + 상태를 PROCESSING 으로 전환
+    # 2) 초기 상태 저장 후 즉시 응답할 준비
     with SessionLocal() as db:
         set_task_db(db, task_id, status="PROCESSING", image_results=image_results)
 
-    # 3) 백그라운드: 나머지 프레임을 하나씩 감지하면서 DB에 "점진 갱신" + 마지막에 비디오 생성
+    # 3) 백그라운드에서 나머지 전부 디코드+배치 추론+점진 저장+최종 영상 생성
     def bg_finish_and_render():
         try:
             name_to_result = {r["filename"]: r for r in image_results}
 
-            # 아직 비어있는 항목들만 추출(원래 순서 유지)
-            pending = [(fname, bgr) for (fname, bgr) in decoded
-                    if not name_to_result.get(fname, {}).get("detections")]
-
-            # 배치 추론
+            pending = [m for m in manifest if not name_to_result.get(m["filename"], {}).get("detections")]
             for i in range(0, len(pending), max(1, BATCH_SIZE)):
                 batch = pending[i:i + BATCH_SIZE]
-                batch_imgs = [bgr for (_, bgr) in batch]
-                batch_names = [fname for (fname, _) in batch]
 
-                # 한번에 N개 추론
+                # 디코드
+                batch_imgs, batch_names = [], []
+                for itm in batch:
+                    with open(itm["path"], "rb") as fp:
+                        data = fp.read()
+                    img = safe_decode_and_resize(data, TARGET_W, TARGET_H)
+                    batch_imgs.append(img)
+                    batch_names.append(itm["filename"])
+
+                # 한 번에 추론
                 det_lists = run_yolo_np_bgr(batch_imgs, imgsz=FINAL_IMGSZ, conf=FINAL_CONF, max_det=100)
 
-                # 결과 합치고 DB에 증분 저장
+                # 결과 반영 + 점진 저장
                 for fname, dets in zip(batch_names, det_lists):
                     avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
-                    name_to_result[fname] = {
-                        "filename": fname,
-                        "detections": dets,
-                        "avg_confidence": avg_conf
-                    }
+                    name_to_result[fname] = {"filename": fname, "detections": dets, "avg_confidence": avg_conf}
 
                 with SessionLocal() as db:
-                    sorted_results = [name_to_result[p] for p, _ in decoded]
+                    sorted_results = [name_to_result[m["filename"]] for m in manifest]
                     set_task_db(db, task_id, status="PROCESSING", image_results=sorted_results)
 
-            # 모두 끝났으면 같은 순서로 frames_with_dets 생성
-            filled: list[tuple[np.ndarray, list]] = []
-            for fname, bgr in decoded:
-                dets = name_to_result[fname]["detections"]
-                filled.append((bgr, dets))
+            # 최종 비디오 재료 만들기
+            frames_with_dets: list[tuple[np.ndarray, list]] = []
+            for m in manifest:
+                with open(m["path"], "rb") as fp:
+                    data = fp.read()
+                img = safe_decode_and_resize(data, TARGET_W, TARGET_H)
+                dets = name_to_result[m["filename"]]["detections"]
+                frames_with_dets.append((img, dets))
 
-            # 비디오 생성(상태는 이 함수 안에서 SUCCESS/FAILURE로 마무리)
-            create_analysis_video(current_user, task_id, filled)
+            create_analysis_video(current_user, task_id, frames_with_dets)
 
         except Exception as e:
             with SessionLocal() as db:
@@ -1052,7 +1088,7 @@ async def start_video_analysis(
 
     threading.Thread(target=bg_finish_and_render, daemon=True).start()
 
-    # 클라이언트는 task_id 로 폴링
+    # 4) 프론트는 task_id로 폴링
     return {"task_id": task_id, "results": image_results}
 
 # 일일 박스 카운트 증가
