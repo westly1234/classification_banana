@@ -50,3 +50,9 @@ class TaskStatus(Base):
     result = Column(String, nullable=True)            # "/results/xxx.mp4" 또는 절대 URL
     image_results = Column(Text, nullable=False, default="[]")  # JSON 문자열(썸네일 결과)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+class DailyBoxCount(Base):
+    __tablename__ = "daily_box_count"
+    date = Column(Date, primary_key=True, index=True)
+    counts_json = Column(Text, default="{}")  # {"완숙": 12, "미숙": 3, ...}
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

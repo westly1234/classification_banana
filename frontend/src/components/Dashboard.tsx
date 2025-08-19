@@ -173,6 +173,7 @@ const Dashboard = () => {
     "신선한 완숙": "#22c55e", "과숙": "#f97316", "썩음": "#78350f"
   };
   const pieData = Object.entries(summary.ripeness_counts).filter(([k]) => k !== "비디오분석").map(([name, value]) => ({ name, value }));
+  const totalBoxes = pieData.reduce((s, d) => s + d.value, 0);
   const sortedDailyStats = [...statsWithToday].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
   return (
@@ -225,10 +226,10 @@ const Dashboard = () => {
                       {pieData.map((entry, index) => (
                         <Cell key={`cell-${index}`} fill={COLORS[entry.name] || '#ccc'} stroke="none" />
                       ))}
-                      <Label value={summary.today} position="center" className="text-4xl font-bold fill-slate-700" dy={-5} />
-                      <Label value="오늘 분석 건" position="center" dy={20} className="text-sm fill-slate-500" />
+                      <Label value={totalBoxes} position="center" className="text-4xl font-bold fill-slate-700" dy={-5} />
+                      <Label value="오늘 탐지 수" position="center" dy={20} className="text-sm fill-slate-500" />
                     </Pie>
-                    <Tooltip formatter={(value: number, name: string) => [`${value}건`, name]}/>
+                    <Tooltip formatter={(value: number, name: string) => [`${value}개`, name]}/>
                     <Legend iconType="circle" />
                   </PieChart>
                 </ResponsiveContainer>

@@ -41,7 +41,7 @@ from ultralytics import YOLO
 
 # 로컬 DB 및 모델 초기화
 from db import engine, SessionLocal, init_db
-from models import User, Analysis, DailyAnalysisStat, TaskStatus
+from models import User, Analysis, DailyAnalysisStat, TaskStatus, DailyBoxCount
 
 # --- 한국 시간 설정 ---
 KST = pytz.timezone("Asia/Seoul")
@@ -599,7 +599,7 @@ def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int =
     return letterbox_image(img, dst_w, dst_h)  # BGR
 
 VIDEO_FPS = _int("VIDEO_FPS", 8)
-HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.0)
+HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.6)
 # ---------------------------
 # 오버레이(박스/라벨) 그리기
 # ---------------------------
@@ -668,7 +668,9 @@ def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> Non
 # ---------------------------------------
 # 비디오 작성: 좌→우 패닝(확대 + 이동)으로 실시간 스캔 느낌
 # ---------------------------------------
-def _pad_sides(img_bgr: np.ndarray, pad: int = 12) -> np.ndarray:
+TILE_PAD = int(os.getenv("TILE_PAD", "12"))
+
+def _pad_sides(img_bgr: np.ndarray, pad: int = TILE_PAD) -> np.ndarray:
     return cv2.copyMakeBorder(img_bgr, 0, 0, pad, pad, cv2.BORDER_CONSTANT, value=(0,0,0))
 
 def make_long_strip(frames_with_dets: List[Tuple[np.ndarray, list]], out_w: int, out_h: int) -> np.ndarray:
@@ -710,6 +712,10 @@ def write_video(
 
     long_img = make_long_strip(frames_with_dets, out_w, out_h)
     H, L = long_img.shape[0], long_img.shape[1]
+
+    start_dx = TILE_PAD
+    end_dx   = max(start_dx, L - out_w - TILE_PAD)
+
     if L <= out_w:
         # 이동 여지가 없으면 그냥 정지 비디오
         scroll_frames = max(1, int(math.ceil(hold_sec * fps)))
@@ -720,7 +726,7 @@ def write_video(
         frames = []
         for i in range(total_frames):
             t = i / (total_frames - 1) if total_frames > 1 else 0.0  # 0→1
-            dx = int(round(t * (L - out_w)))  # 왼→오
+            dx = int(round(start_dx + t * (end_dx - start_dx))) 
             crop = long_img[:, dx:dx + out_w]
             if crop.shape[1] < out_w:
                 # 우측 끝에서 부족하면 패딩
@@ -803,6 +809,14 @@ def create_analysis_video(
         labels   = [d.get("ripeness", "분석불가") for d in all_dets]
         final_ripeness = Counter(labels).most_common(1)[0][0] if labels else "분석불가"
         freshness = LABEL_SCORE.get(final_ripeness, 0.0)
+        
+        db2 = SessionLocal()
+        try:
+            increment_daily_box_counts_bulk(db2, frames_with_dets)   # <-- 추가
+        except Exception as e:
+            print("[warn] increment_daily_box_counts_bulk failed:", e)
+        finally:
+            db2.close()
 
         db = SessionLocal()
         try:
@@ -881,6 +895,8 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
                 confidence=avg_conf, freshness=avg_fresh,
                 image_blob=img_bytes, created_at=datetime.now(KST)
             ))
+            increment_daily_box_counts(db, detections)
+
             db.commit()
             update_daily_analysis_stat(db, datetime.now(KST).date())
         finally:
@@ -999,6 +1015,40 @@ async def start_video_analysis(
     # 클라이언트는 task_id 로 폴링
     return {"task_id": task_id, "results": image_results}
 
+# 일일 박스 카운트 증가
+def increment_daily_box_counts(db: Session, detections: list):
+    """
+    detections: [{ripeness: "...", ...}, ...]  (한 이미지의 결과)
+    오늘 날짜의 클래스별 박스 카운트를 증가합니다.
+    """
+    today = datetime.now(KST).date()
+    row = db.query(DailyBoxCount).get(today)
+    if not row:
+        row = DailyBoxCount(date=today, counts_json="{}")
+        db.add(row)
+
+    current = Counter(json.loads(row.counts_json or "{}"))
+    inc = Counter(d.get("ripeness", "분석불가") for d in (detections or []))
+    current.update(inc)
+
+    row.counts_json = json.dumps(current, ensure_ascii=False)
+    db.commit()
+
+def increment_daily_box_counts_bulk(db: Session, frames_with_dets: List[Tuple[np.ndarray, list]]):
+    today = datetime.now(KST).date()
+    row = db.query(DailyBoxCount).get(today)
+    if not row:
+        row = DailyBoxCount(date=today, counts_json="{}")
+        db.add(row)
+
+    current = Counter(json.loads(row.counts_json or "{}"))
+
+    for _, dets in frames_with_dets:
+        current.update(Counter(d.get("ripeness", "분석불가") for d in (dets or [])))
+
+    row.counts_json = json.dumps(current, ensure_ascii=False)
+    db.commit()
+
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---
 @task_router.get("/{task_id}/status")
 async def get_task_status(task_id: str, request: Request):
@@ -1039,6 +1089,9 @@ def get_stats(db: Session = Depends(get_db)):
     # ✅ 통계 테이블에서 오늘자 데이터 가져옴
     today_stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == today).first()
 
+    box_row = db.query(DailyBoxCount).filter(DailyBoxCount.date == today).first()
+    ripeness_counts = json.loads(box_row.counts_json or "{}") if box_row else {}
+
     if not today_stat:
         # 통계가 없으면 0으로 리턴 (혹은 update_daily_analysis_stat() 호출도 가능)
         return {
@@ -1047,22 +1100,6 @@ def get_stats(db: Session = Depends(get_db)):
             "totalUploads": db.query(Analysis).count(),
             "ripeness_counts": {}
         }
-
-    # ✅ 실시간 숙성도 분포만 analysis에서 구함 (도넛 차트용)
-    start_dt = datetime.combine(today, dtime.min).astimezone(KST)
-    end_dt = datetime.combine(today, dtime.max).astimezone(KST)
-
-    ripeness_counts_query = (
-        db.query(Analysis.ripeness, func.count(Analysis.id))
-        .filter(
-            Analysis.created_at >= start_dt,
-            Analysis.created_at <= end_dt,
-            Analysis.ripeness != "비디오분석"
-        )
-        .group_by(Analysis.ripeness)
-        .all()
-    )
-    ripeness_counts = {ripeness: count for ripeness, count in ripeness_counts_query}
 
     return {
         "todayAnalyses": today_stat.total_count,
@@ -1145,23 +1182,10 @@ def get_summary_stats():
             Analysis.created_at < today_start
         ).scalar()
 
-        # 숙성도 분포 쿼리
-        start_dt = datetime.combine(today, dtime.min).astimezone(KST)
-        end_dt = datetime.combine(today, dtime.max).astimezone(KST)
+        box_row = db.query(DailyBoxCount).filter(DailyBoxCount.date == today).first()
+        ripeness_counts = json.loads(box_row.counts_json or "{}") if box_row else {}
 
-        ripeness_counts_query = (
-            db.query(Analysis.ripeness, func.count(Analysis.id))
-            .filter(
-                Analysis.created_at >= start_dt,
-                Analysis.created_at <= end_dt,
-                Analysis.ripeness != "비디오분석"
-            )
-            .group_by(Analysis.ripeness)
-            .all()
-        )
-        ripeness_counts = {r: c for r, c in ripeness_counts_query}
-
-        # 어제까지 숙성 종류 수
+        # 어제까지 숙성종류 수
         yest_end = datetime.combine(yesterday, dtime.max).astimezone(KST)
         ripeness_types_yesterday = db.query(func.count(func.distinct(Analysis.ripeness))).filter(
             Analysis.created_at <= yest_end
