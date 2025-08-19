@@ -194,6 +194,17 @@ export default function Analyze() {
     } catch {}
   }, []);
 
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isAnalyzing || pollRef.current) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [isAnalyzing]);
+
   useLayoutEffect(() => {
     if (!leftColRef.current) return;
     const measure = () =>
@@ -459,6 +470,17 @@ export default function Analyze() {
 
   return (
     <div className="bg-slate-50 min-h-screen flex flex-col font-sans">
+      {(isAnalyzing || !!pollRef.current) && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed top-3 left-1/2 -translate-x-1/2 z-50
+                     bg-amber-50 text-amber-700 border border-amber-300
+                     rounded-full px-4 py-2 shadow"
+        >
+          분석/동영상 생성 중입니다. 새로고침이나 탭 이동을 피해주세요.
+        </div>
+      )}
       <main className="flex-grow grid grid-cols-1 lg:grid-cols-12 gap-6 p-4 sm:p-6">
         <div ref={leftColRef} className="lg:col-span-8 xl:col-span-9 flex flex-col gap-6">
           {/* 미디어 뷰어 */}
@@ -537,16 +559,13 @@ export default function Analyze() {
                     const y = ny * imgOverlay.drawH;
                     const w = nw * imgOverlay.drawW;
                     const h = nh * imgOverlay.drawH;
+                    const LABEL_H = 18;
                     return (
-                      <div
-                        key={i}
-                        style={{
-                          position: 'absolute',
-                          left: x, top: y, width: w, height: h,
-                          border: '3px solid #FACC15', borderRadius: 2,
-                        }}
-                      >
-                        <div className="absolute -top-6 left-0 bg-black/80 text-white text-xs px-1.5 rounded">
+                      <div key={i} style={{ position:'absolute', left:x, top:y, width:w, height:h, border:'3px solid #FACC15', borderRadius:2 }}>
+                        <div
+                          className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
+                          style={{ left: 0, top: Math.max(0, y - LABEL_H < 0 ? 0 : -LABEL_H) }} // 박스 위에 붙이고 화면 위로는 못 나가게
+                        >
                           {det.ripeness} {(det.confidence * 100).toFixed(1)}%
                         </div>
                       </div>
@@ -623,7 +642,13 @@ export default function Analyze() {
                           height: `${det.boundingBox.height * 100}%`,
                         }}
                       >
-                        <div className="absolute -top-4 left-0 bg-black/80 text-white text-[10px] sm:text-xs px-1.5 rounded font-semibold whitespace-nowrap">
+                        <div
+                          className="absolute bg-black/80 text-white text-[10px] sm:text-xs px-1.5 rounded font-semibold whitespace-nowrap"
+                          style={{
+                            left: 0,
+                            top: Math.max(0, -1 + 0),   // 필요 시 고정 라벨 높이만큼 더 내리고 싶으면 숫자(예: 18) 사용
+                          }}
+                        >
                           {det.ripeness} {Number((det.confidence * 100).toFixed(1))}%
                         </div>
                       </div>

@@ -323,9 +323,16 @@ FRESHNESS_MAP = {
     "rotten": 0.0,
 }
 
-# YOLO/CPU 튜닝: 무료 1코어 환경 고려
-cv2.setNumThreads(1)
-torch.set_num_threads(max(1, (os.cpu_count() or 1) // 2))
+CPU_CORES = max(1, os.cpu_count() or 1)
+
+# YOLO/OpenCV 스레드 수
+cv2.setNumThreads(1 if CPU_CORES <= 2 else 2)
+torch.set_num_threads(1 if CPU_CORES <= 2 else 2)
+
+# 추론용 스레드풀
+EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1 if CPU_CORES <= 2 else 2
+)
 
 # 해상도 일관화(모델/전처리/비디오 공통)
 MODEL_W = int(os.getenv("MODEL_W", "640"))
@@ -337,12 +344,9 @@ TARGET_H = int(os.getenv("TARGET_H", str(MODEL_H)))
 MAX_FILES = int(os.getenv("MAX_FILES", "20"))                 # 프론트는 제한 제거(아래 4번), 서버는 안전빵
 MAX_BYTES = int(os.getenv("MAX_BYTES", str(10*1024*1024)))    # 10MB/파일
 
-# 추론 전용 스레드풀(ADD)
-EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-
 #  비디오 생성(멀티 이미지) 최적화 + 해상도 키우기
 INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
-VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
+VIDEO_FPS = int(os.getenv("VIDEO_FPS", "6"))
 SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
 
 # 감지 파라미터
@@ -599,7 +603,7 @@ def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int =
     return letterbox_image(img, dst_w, dst_h)  # BGR
 
 VIDEO_FPS = _int("VIDEO_FPS", 8)
-HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.6)
+HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.5)
 # ---------------------------
 # 오버레이(박스/라벨) 그리기
 # ---------------------------
@@ -746,6 +750,7 @@ def write_video(
                 "-s", f"{out_w}x{out_h}",
                 "-r", str(fps), "-i","-",
                 "-c:v","libx264","-preset","veryfast","-crf","23",
+                "-threads", "1" if CPU_CORES <= 2 else "2",
                 "-pix_fmt","yuv420p","-movflags","+faststart",
                 out_path
             ]
@@ -1061,23 +1066,29 @@ async def get_task_status(task_id: str, request: Request):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    result = task.get("result")  # 보통 "/results/xxx.mp4"
+    result = task.get("result")
     absolute_result = None
 
-    if isinstance(result, str):
-        # 이미 절대 URL이면 그대로 사용
+    if isinstance(result, str) and result:
         if result.startswith("http://") or result.startswith("https://"):
             absolute_result = result
         elif result.startswith("/"):
-            # 프록시 헤더에서 첫 값 사용
+            # 1) x-forwarded-* 우선
             proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
             host  = (request.headers.get("x-forwarded-host")  or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
-            absolute_result = f"{proto}://{host}{result}"
+            candidate = f"{proto}://{host}{result}"
+
+            # 2) base_url 폴백 (프록시 헤더가 틀릴 때)
+            base = str(request.base_url).rstrip("/")
+            if not proto or not host:
+                absolute_result = f"{base}{result}"
+            else:
+                absolute_result = candidate or f"{base}{result}"
 
     return {
         "status": task.get("status"),
-        "result": result,                 # 상대 경로 유지
-        "absolute_result": absolute_result,  # 프런트는 이걸 우선 사용
+        "result": result,
+        "absolute_result": absolute_result,
         "image_results": task.get("image_results", []),
     }
 

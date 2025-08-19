@@ -227,7 +227,7 @@ const Dashboard = () => {
                         <Cell key={`cell-${index}`} fill={COLORS[entry.name] || '#ccc'} stroke="none" />
                       ))}
                       <Label value={totalBoxes} position="center" className="text-4xl font-bold fill-slate-700" dy={-5} />
-                      <Label value="오늘 탐지 수" position="center" dy={20} className="text-sm fill-slate-500" />
+                      <Label value="오늘의 바나나 탐지" position="center" dy={20} className="text-sm fill-slate-500" />
                     </Pie>
                     <Tooltip formatter={(value: number, name: string) => [`${value}개`, name]}/>
                     <Legend iconType="circle" />
