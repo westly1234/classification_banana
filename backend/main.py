@@ -345,6 +345,17 @@ INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
 VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
 SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
 
+# 감지 파라미터
+QUICK_IMGSZ = int(os.getenv("QUICK_IMGSZ", "512"))
+FINAL_IMGSZ = int(os.getenv("FINAL_IMGSZ", "640"))
+QUICK_CONF  = float(os.getenv("QUICK_CONF",  "0.25"))
+FINAL_CONF  = float(os.getenv("FINAL_CONF",  "0.10"))
+MAX_DET     = int(os.getenv("MAX_DET",      "3"))
+
+# 팬(스크롤) 느낌
+PAN_PX_PER_SEC = int(os.getenv("PAN_PX_PER_SEC", "120"))  # 초당 이동 픽셀
+HOLD_SEC_PER_IMG = float(os.getenv("HOLD_SEC_PER_IMG", "2.0"))  # 한 장당 최소 체류
+
 # 한글 폰트 경로: 환경변수 우선, 없으면 프로젝트 상대 경로
 FONT_PATH = os.getenv(
     "FONT_PATH",
@@ -360,37 +371,6 @@ def _get_font(size: int = 24):
             _font_cache[size] = ImageFont.load_default()  # (한글 미지원일 수 있음)
     return _font_cache[size]
 
-def _put_korean_text_bgr(frame_bgr: np.ndarray, text: str, x: int, y: int, font_size: int = 24) -> np.ndarray:
-    """
-    (x,y)는 왼쪽-아래 정렬 기준점.
-    검은 배경 + 흰 글씨(한글 지원)으로 그리고 BGR 프레임을 반환.
-    """
-    h, w = frame_bgr.shape[:2]
-    img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-    draw = ImageDraw.Draw(img)
-    font = _get_font(font_size)
-
-    # 텍스트 박스 크기
-    l, t, r, b = draw.textbbox((0, 0), text, font=font)
-    tw, th = r - l, b - t
-    pad = 6
-
-    # 경계 클램프 (오른쪽/아랫쪽 나가지 않게)
-    box_w = tw + pad * 2
-    box_h = th + pad * 2
-    x = max(0, min(w - box_w, x))
-    y_top = max(0, y - box_h - 2)
-
-    # 반투명 배경(알파 포함) 그리기: paste + 자체 알파 사용 → 버전 호환
-    bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
-    img.paste(bg, (x, y_top), bg)
-
-    # 텍스트
-    draw.text((x + pad, y_top + pad), text, font=font, fill=(255, 255, 255, 255))
-
-    # 되돌리기
-    return cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
-
 # --- YOLO 분석 함수 (여러 객체 지원) ---
 def letterbox_image(img, target_width, target_height):
     h, w = img.shape[:2]
@@ -403,60 +383,31 @@ def letterbox_image(img, target_width, target_height):
     new_img[top:top+nh, left:left+nw] = resized
     return new_img
 
-def run_yolo_np_bgr(img_bgr: np.ndarray):
+def run_yolo_np_bgr(img_bgr: np.ndarray, imgsz=None, conf=None, max_det=None):
     if not model:
         raise HTTPException(status_code=503, detail="모델을 사용할 수 없습니다.")
 
     h, w = img_bgr.shape[:2]
-    # imgsz는 (w, h)로 일치시킴
-    results = model(img_bgr, imgsz=(w, h), conf=0.1, verbose=False)[0]
+    imgsz = imgsz or (w, h)
+    res = model(img_bgr, imgsz=imgsz, conf=(conf or 0.1),
+                max_det=(max_det or 100), verbose=False)[0]
 
     out = []
-    VALID_CLASSES = {"ripe","unripe","freshripe","freshunripe","overripe","rotten"}
-
-    with torch.inference_mode():
-        results = model(
-            img_bgr,
-            imgsz=(w, h),
-            conf=0.25,           # 너무 낮으면 박스 많아져서 느려짐
-            iou=0.5,
-            max_det=8,           # ✅ 최대 박스 수 제한
-            classes=None,        # (필요시) 특정 클래스만: [ids...]
-            verbose=False
-        )[0]
-
-    if results.boxes:
-        for box in results.boxes:
-            cls_idx = int(box.cls.item())
-            cls_name = model.names[cls_idx]
-            if cls_name not in VALID_CLASSES:
-                continue
-
-            conf = float(box.conf.item())
-            x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
-
-            # 1) 프레임 경계로 픽셀단 클램프
-            x1 = max(0.0, min(w - 1.0, x1))
-            y1 = max(0.0, min(h - 1.0, y1))
-            x2 = max(x1 + 1.0, min(float(w), x2))
-            y2 = max(y1 + 1.0, min(float(h), y2))
-
-            # 2) 정규화
-            nx, ny = x1 / w, y1 / h
-            nw, nh = (x2 - x1) / w, (y2 - y1) / h
-
-            # 3) 최종 [0,1] 클램프 (폭/높이는 남은 영역 안으로)
-            nx = max(0.0, min(1.0, nx))
-            ny = max(0.0, min(1.0, ny))
-            nw = max(0.0, min(1.0 - nx, nw))
-            nh = max(0.0, min(1.0 - ny, nh))
-
-            out.append({
-                "ripeness": KOREAN_CLASSES.get(cls_name, cls_name),
-                "confidence": round(conf, 3),
-                "freshness": round(FRESHNESS_MAP.get(cls_name, 0.0), 3),
-                "boundingBox": {"x": round(nx,4), "y": round(ny,4), "width": round(nw,4), "height": round(nh,4)}
-            })
+    VALID = {"ripe","unripe","freshripe","freshunripe","overripe","rotten"}
+    for box in (res.boxes or []):
+        cls = model.names[int(box.cls.item())]
+        if cls not in VALID: 
+            continue
+        x1,y1,x2,y2 = box.xyxy[0]
+        out.append({
+            "ripeness": KOREAN_CLASSES.get(cls, cls),
+            "confidence": float(box.conf.item()),
+            "freshness": round(FRESHNESS_MAP.get(cls, 0.0), 3),
+            "boundingBox": {
+                "x": round(x1.item()/w,4), "y": round(y1.item()/h,4),
+                "width": round((x2-x1).item()/w,4), "height": round((y2-y1).item()/h,4),
+            },
+        })
     return out
 
 # --- 🔑 인증 의존성 ---
@@ -956,14 +907,15 @@ async def start_video_analysis(
 
     task_id = str(uuid.uuid4())
     with SessionLocal() as db:
+        # 상태를 먼저 생성
         set_task_db(db, task_id, status="PENDING", result=None, image_results=[])
 
     loop = asyncio.get_running_loop()
-    frames_bgr: list[np.ndarray] = []
-    image_results: list[dict] = []
 
-    # 1) 업로드 파일들 디코드만 먼저(빨리)
-    decoded: list[tuple[str, np.ndarray]] = []
+    # 1) 업로드 파일들 디코드만 먼저(가볍고 빠르게)
+    decoded: list[tuple[str, np.ndarray]] = []   # [(filename, bgr)]
+    image_results: list[dict] = []               # 프런트에 내려줄 썸네일 상태
+
     for f in files[:MAX_FILES]:
         content = await f.read()
         if not content:
@@ -974,51 +926,77 @@ async def start_video_analysis(
                 "error": f"파일 용량(최대 {MAX_BYTES//1024//1024}MB) 초과"
             })
             continue
+
         try:
             bgr = await loop.run_in_executor(EXECUTOR, safe_decode_and_resize, content, TARGET_W, TARGET_H)
             decoded.append((f.filename, bgr))
-            frames_bgr.append(bgr)
         except Exception as e:
             image_results.append({"filename": f.filename, "detections": [], "avg_confidence": 0, "error": str(e)})
 
-    # 2) 앞의 FAST_PREVIEW장만 즉시 추론 → 썸네일에 바로 표시
+    # 유효 이미지가 하나도 없으면 종료
+    if len(decoded) == 0 and all(len(r.get("detections", [])) == 0 for r in image_results):
+        with SessionLocal() as db:
+            set_task_db(db, task_id, status="FAILURE", result="유효한 이미지가 없습니다.", image_results=image_results)
+        return {"task_id": task_id, "results": image_results}
+
+    # 2) 앞의 FAST_PREVIEW 장만 즉시 감지하여 바로 표시
     for idx, (fname, bgr) in enumerate(decoded):
         if idx < FAST_PREVIEW:
             dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr)
             avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
             image_results.append({"filename": fname, "detections": dets, "avg_confidence": avg_conf})
         else:
-            # 나머지는 일단 빈 결과로 빠르게 응답
+            # 아직 미처리 → 빈 결과로 자리만 잡아둠(프런트는 이게 추후 채워지는 걸 폴링으로 받음)
             image_results.append({"filename": fname, "detections": [], "avg_confidence": 0})
 
-    # DB에 썸네일 결과 저장하고 즉시 200
+    # 초기 썸네일 상태 저장 + 상태를 PROCESSING 으로 전환
     with SessionLocal() as db:
-        set_task_db(db, task_id, image_results=image_results)
+        set_task_db(db, task_id, status="PROCESSING", image_results=image_results)
 
-    # 3) 백그라운드에서 나머지 프레임 추론 + 비디오 렌더
+    # 3) 백그라운드: 나머지 프레임을 하나씩 감지하면서 DB에 "점진 갱신" + 마지막에 비디오 생성
     def bg_finish_and_render():
         try:
-            # 누락된 프레임들을 순차 추론
+            # 파일명 기준으로 결과를 빠르게 찾기 위해 map 구성
+            # (주의: 최종 image_results 정렬은 decoded 순서를 유지)
+            name_to_result = {r["filename"]: r for r in image_results}
+
+            # 이미 처리된 FAST_PREVIEW는 그대로 두고, 나머지 이미지만 순차 감지
+            for idx, (fname, bgr) in enumerate(decoded):
+                if name_to_result.get(fname, {}).get("detections"):
+                    continue  # 이미 채워진 썸네일(FAST_PREVIEW)
+
+                dets = run_yolo_np_bgr(bgr)  # CPU 1코어 환경에선 순차가 가장 안정적
+                avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
+
+                # 현재 항목 갱신
+                name_to_result[fname] = {
+                    "filename": fname,
+                    "detections": dets,
+                    "avg_confidence": avg_conf
+                }
+
+                # 🔁 여기서 "증분 저장" — 프런트 폴링이 있으면 썸네일이 한 장씩 채워짐
+                with SessionLocal() as db:
+                    # decoded 순서로 다시 리스트 구성(정렬 보장)
+                    sorted_results = [name_to_result[p] for p, _ in decoded]
+                    set_task_db(db, task_id, status="PROCESSING", image_results=sorted_results)
+
+            # 모두 끝났으면 같은 순서로 frames_with_dets 생성
             filled: list[tuple[np.ndarray, list]] = []
-            name_to_dets = {r["filename"]: r for r in image_results}
             for fname, bgr in decoded:
-                dets = name_to_dets[fname]["detections"]
-                if not dets:  # 비어있던 것만 추론
-                    d = run_yolo_np_bgr(bgr)
-                    name_to_dets[fname]["detections"] = d
-                filled.append((bgr, name_to_dets[fname]["detections"]))
+                dets = name_to_result[fname]["detections"]
+                filled.append((bgr, dets))
 
-            # 중간 결과 갱신
-            with SessionLocal() as db:
-                set_task_db(db, task_id, status="PROCESSING", image_results=list(name_to_dets.values()))
-
-            # 비디오 생성 (draw_overlay는 서버에서)
+            # 비디오 생성(이 함수 안에서 상태 SUCCESS/FAILURE 업데이트)
             create_analysis_video(current_user, task_id, filled)
+
         except Exception as e:
             with SessionLocal() as db:
                 set_task_db(db, task_id, status="FAILURE", result=str(e))
 
     threading.Thread(target=bg_finish_and_render, daemon=True).start()
+
+    # 클라이언트는 task_id 로 폴링
     return {"task_id": task_id, "results": image_results}
 
 # --- 작업 상태 확인 라우터 (인증 필요 없음) ---

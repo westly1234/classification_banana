@@ -56,6 +56,43 @@ const persistStrip = (arr: AnalysisState[]) => {
   sessionStorage.setItem('imageStrip', JSON.stringify(slim));
 };
 
+// 파일명 정규화(윈/유닉스)
+const normBase = (s?: string) => (s ? s.split('\\').pop()!.split('/').pop()! : '');
+
+// 서버 image_results를 현재 analysisStates에 반영
+function mergeServerImageResults(
+  prev: AnalysisState[],
+  server: ImageAnalysisResultPayload[],
+  idsToAnalyze?: Set<string>
+) {
+  const map = new Map(server.map(r => [normBase(r.filename), r]));
+  const next = prev.map(s => {
+    // 선택한 항목만 갱신하고 싶다면 필터
+    if (idsToAnalyze && !idsToAnalyze.has(s.id)) return s;
+
+    // analyze_video로 보낸 항목은 file이 있음(복원된 항목은 없음)
+    if (!s.file) return s;
+
+    const m = map.get(normBase(s.file.name));
+    if (!m) return s;
+
+    const dets = (m.detections ?? []).map(d => ({ ...d, label: d.ripeness }));
+
+    // 진행 중에는 '검출 있음' 또는 '에러가 있으면' 완료로 처리
+    const finished = dets.length > 0 || Boolean(m.error);
+
+    return {
+      ...s,
+      result: dets,
+      avg_confidence: m.avg_confidence ?? s.avg_confidence,
+      error: m.error ?? null,        // ⬅️ 서버 에러 반영
+      isLoading: !finished,          // ⬅️ 완료면 로딩 해제
+    };
+  });
+  persistStrip(next);
+  return next;
+}
+
 export default function Analyze() {
   const [analysisStates, setAnalysisStates] = useState<AnalysisState[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -297,7 +334,7 @@ export default function Analyze() {
       }
   }
   const analyzeMultipleImagesAsVideo = (statesToAnalyze: WithFile[]): Promise<void> =>
-    new Promise(async (resolve, reject) => {
+    new Promise(async (reject) => {
       setTaskStatus('이미지 분석 및 동영상 생성 요청 중...');
       const idsToAnalyze = new Set(statesToAnalyze.map(s => s.id));
       setAnalysisStates(prev =>
@@ -334,33 +371,52 @@ export default function Analyze() {
         setActiveId(null); 
         pollRef.current = window.setInterval(async () => {
           try {
-            const { data } = await api.get(`/tasks/${task_id}/status`);
+            // 캐시 우회를 위해 ts 붙임
+            const { data } = await api.get(`/tasks/${task_id}/status`, { params: { ts: Date.now() } });
+
+            // 1) PROCESSING 동안에도 썸네일을 계속 채우기
+            if (Array.isArray(data.image_results) && data.image_results.length > 0) {
+              setAnalysisStates(prev => mergeServerImageResults(prev, data.image_results, idsToAnalyze));
+              
+              // 진행률 문구 (검출됐거나 에러가 있는 이미지를 '완료'로 간주)
+              const done = data.image_results.filter((r: any) => (r?.detections?.length ?? 0) > 0 || r?.error).length;
+              const total = statesToAnalyze.length;
+              setTaskStatus(`분석 중... ${done}/${total}`);
+            }
+
+            // 2) 종료 처리
             if (data.status === 'SUCCESS' || data.status === 'FAILURE') {
               if (pollRef.current) clearInterval(pollRef.current);
               pollRef.current = null;
 
+              // 마지막으로 한 번 더 머지(혹시 누락된 프레임 보정)
+              if (Array.isArray(data.image_results)) {
+                setAnalysisStates(prev => mergeServerImageResults(prev, data.image_results, idsToAnalyze));
+              }
+
+              setIsAnalyzing(false);
+
               if (data.status === 'SUCCESS') {
-                const finalRel = data.result;          
+                const finalRel = data.result; // "/results/xxx.mp4"
                 const absolute = data.absolute_result ?? api.getUri({ url: finalRel });
                 const bust = `?t=${Date.now()}`;
 
                 setVideoUrl(absolute + bust);
                 setMainViewerUrl(absolute + bust);
-                sessionStorage.setItem('lastVideoUrl', finalRel);     
+                sessionStorage.setItem('lastVideoUrl', finalRel);
                 setTaskStatus(null);
-                resolve();
               } else {
                 setTaskStatus(`오류: 동영상 생성 실패`);
-                reject(new Error(data.result));
               }
             }
           } catch (pollError) {
             if (pollRef.current) clearInterval(pollRef.current);
             pollRef.current = null;
+            setIsAnalyzing(false);
             setTaskStatus('상태 확인 중 오류');
-            reject(pollError);
+            console.error(pollError);
           }
-        }, 3000);
+        }, 1000); // ⬅️ 1초 간격으로 폴링(더 빠르게)
       } catch (reqError: any) {
         const msg = reqError.response?.data?.detail ||   (reqError.code === 'ECONNABORTED' ? '요청 시간이 초과되었습니다. 잠시 후 다시 시도하세요.' :
           '서버가 바쁘거나 일시적으로 중단되었습니다. 잠시 후 다시 시도하세요.');
