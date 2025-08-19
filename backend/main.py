@@ -176,8 +176,6 @@ class SimpleAuth(AuthenticationBackend):
             return False 
         
 # --- 🧠 FastAPI 앱 생성 ---
-
-# (원하면 문서 숨김: docs_url=None, redoc_url=None)
 app = FastAPI(title="바나나 YOLO 분석")
 
 admin = Admin(app, engine, authentication_backend=SimpleAuth(secret_key=SECRET_KEY))
@@ -196,9 +194,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONT_EXACT,            # 정확 매칭 우선
     allow_origin_regex=FRONT_REGEX,       # 1,2,... 번호가 바뀌어도 허용
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    allow_credentials=False,          # 쿠키 안 쓰니 굳이 True 필요 없음
+    allow_methods=["*"],              # 전체 허용
+    allow_headers=["*"],              # 전체 허용 (프리플라이트 헤더 불일치 방지)
     expose_headers=["Content-Type", "Cache-Control", "Content-Disposition"],
     max_age=86400,                        # 프리플라이트 24h 캐시
 )
@@ -418,6 +416,12 @@ def letterbox_image(img, target_width, target_height):
     new_img[top:top+nh, left:left+nw] = resized
     return new_img
 
+def _clip01(v: float) -> float:
+    """
+    0.0 ~ 1.0 범위로 클리핑
+    """
+    return max(0.0, min(1.0, v))
+
 def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
     """
     imgs_bgr: np.ndarray (H,W,3) 또는 [np.ndarray, ...]
@@ -456,28 +460,24 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
             if cls not in VALID:
                 continue
 
-            x1, y1, x2, y2 = box.xyxy[0]
-            # 정규화 + 안전 클램프
-            nx = float(x1.item() / w)
-            ny = float(y1.item() / h)
-            nw = float((x2 - x1).item() / w)
-            nh = float((y2 - y1).item() / h)
-
-            # 0~1 범위 보정 (우측/하단 넘침 방지)
-            nx = max(0.0, min(1.0, nx))
-            ny = max(0.0, min(1.0, ny))
-            nw = max(0.0, min(1.0 - nx, nw))
-            nh = max(0.0, min(1.0 - ny, nh))
+            x1, y1, x2, y2 = box.xyxy[0]  # 좌표 추출
+            nx = _clip01(x1.item() / w)
+            ny = _clip01(y1.item() / h)
+            nw = _clip01((x2 - x1).item() / w)
+            nh = _clip01((y2 - y1).item() / h)
+            # 우측/하단 넘침 보정
+            if nx + nw > 1.0:
+                nw = round(1.0 - nx, 4)
+            if ny + nh > 1.0:
+                nh = round(1.0 - ny, 4)
 
             dets.append({
                 "ripeness": KOREAN_CLASSES.get(cls, cls),
                 "confidence": float(box.conf.item()),
                 "freshness": round(FRESHNESS_MAP.get(cls, 0.0), 3),
                 "boundingBox": {
-                    "x": round(nx, 4),
-                    "y": round(ny, 4),
-                    "width": round(nw, 4),
-                    "height": round(nh, 4),
+                    "x": round(nx, 4), "y": round(ny, 4),
+                    "width": round(nw, 4), "height": round(nh, 4),
                 },
             })
         outputs.append(dets)
@@ -1187,15 +1187,6 @@ async def get_task_status(task_id: str, request: Request):
         "absolute_result": absolute_result,
         "image_results": task.get("image_results", []),
     }
-
-@task_router.get("/{task_id}")
-async def get_task_status_compat(task_id: str, request: Request):
-    return await get_task_status(task_id, request)
-
-@task_router.options("/{task_id}")
-@task_router.options("/{task_id}/status")
-def _cors_preflight_ok(task_id: str):
-    return Response(status_code=200)
 
 # --- 통계 라우터 ---
 @stats_router.get("/", response_model=dict)
