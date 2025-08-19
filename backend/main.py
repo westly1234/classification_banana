@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
 from markupsafe import Markup
-from PIL import ImageFile
+from PIL import Image, ImageDraw, ImageFont, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True # 손상/부분 이미지도 최대한 로드
 from dotenv import load_dotenv
 load_dotenv()
@@ -345,6 +345,40 @@ INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
 VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
 SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
 
+# 한글 폰트 경로: 환경변수 우선, 없으면 프로젝트 상대 경로로 폴백
+FONT_PATH = os.getenv(
+    "FONT_PATH",
+    str((Path(__file__).parent / "fonts" / "NanumGothic.ttf").resolve())
+)
+_font_cache = {}
+
+def _get_font(size: int = 24):
+    """사이즈별 캐시"""
+    if size not in _font_cache:
+        try:
+            _font_cache[size] = ImageFont.truetype(FONT_PATH, size=size)
+        except Exception:
+            _font_cache[size] = ImageFont.load_default()  # 폴백(영문 전용)
+    return _font_cache[size]
+
+def _put_korean_text_bgr(frame_bgr: np.ndarray, text: str, x: int, y: int, font_size: int = 24) -> np.ndarray:
+    """(x,y) 기준 왼쪽-아래 정렬로 검은 배경 + 흰 글씨(한글 지원)를 그려서 BGR 프레임 반환"""
+    img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    draw = ImageDraw.Draw(img)
+    font = _get_font(font_size)
+    # 텍스트 크기
+    l, t, r, b = draw.textbbox((0, 0), text, font=font)
+    tw, th = r - l, b - t
+    pad = 6
+    y_top = max(0, y - th - 8)
+    # 반투명 배경
+    bg = Image.new("RGBA", (tw + pad * 2, th + pad * 2), (0, 0, 0, 210))
+    img.alpha_composite(bg, (x, y_top))
+    # 텍스트
+    draw.text((x + pad, y_top + pad), text, font=font, fill=(255, 255, 255, 255))
+    # 되돌리기
+    return cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+
 # --- YOLO 분석 함수 (여러 객체 지원) ---
 def letterbox_image(img, target_width, target_height):
     h, w = img.shape[:2]
@@ -609,17 +643,19 @@ HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.0)
 def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> None:
     """
     detections: [{boundingBox:{x,y,width,height}, ripeness, confidence}, ...]
-    좌표는 0~1 정규화된 값으로 가정.
+    좌표는 0~1 정규화.
+    프레임을 제자리(in-place)로 수정.
     """
-    for d in detections or []:
+    for d in (detections or []):
         bb = d.get("boundingBox", {})
-        # 정규화 좌표 → 픽셀
-        x1 = int((bb.get("x", 0.0)) * w)
-        y1 = int((bb.get("y", 0.0)) * h)
+
+        # 정규화 -> 픽셀
+        x1 = int(bb.get("x", 0.0) * w)
+        y1 = int(bb.get("y", 0.0) * h)
         x2 = int((bb.get("x", 0.0) + bb.get("width", 0.0)) * w)
         y2 = int((bb.get("y", 0.0) + bb.get("height", 0.0)) * h)
 
-        # 프레임 경계로 클램프
+        # 프레임 경계 클램프
         x1 = max(0, min(w - 1, x1))
         y1 = max(0, min(h - 1, y1))
         x2 = max(x1 + 1, min(w, x2))
@@ -628,81 +664,121 @@ def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> Non
         # 박스
         cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 3)
 
-        # 라벨(클래스 + 정확도)
+        # 라벨(클래스 + 정확도) — run_yolo_np_bgr에서 이미 한국어로 매핑됨
         ripeness = d.get("ripeness", "")
         conf = float(d.get("confidence", 0.0)) * 100.0
         label = f"{ripeness} {conf:.1f}%"
 
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-        y_bg_top = max(0, y1 - th - 8)
-        cv2.rectangle(frame_bgr, (x1, y_bg_top), (x1 + tw + 8, y1), (0, 0, 0), -1)
-        cv2.putText(frame_bgr, label, (x1 + 4, y1 - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+        # OpenCV 텍스트 대신, PIL로 한글 렌더링 후 제자리 반영
+        updated = _put_korean_text_bgr(frame_bgr, label, x1, y1, font_size=24)
+        frame_bgr[:] = updated  # in-place 유지
         
 # ---------------------------------------
-# 비디오 작성(FFmpeg 우선, OpenCV 폴백)
+# 비디오 작성: 좌→우 패닝(확대 + 이동)으로 실시간 스캔 느낌
 # ---------------------------------------
-def write_video(frames_with_dets, out_path, fps=3, hold_sec=1.2):
+def write_video(
+    frames_with_dets: List[Tuple[np.ndarray, list]],
+    out_path: str,
+    fps: int = VIDEO_FPS,          # 예: 8
+    hold_sec: float = HOLD_SEC,    # 한 이미지당 재생 시간(초)
+    pan_ratio: float = 0.10,       # 가로의 10% 만큼 좌→우로 이동
+    zoom_margin: float = 0.02      # 테두리 안 보이게 여유 확대
+) -> None:
+    """
+    - 각 이미지에 대해: 라벨을 먼저 그린 뒤, 확대+좌우 패닝으로 N=ceil(hold_sec*fps) 프레임 생성.
+    - YOLO는 반복 실행하지 않음(가볍고 빠름).
+    """
+    if not frames_with_dets:
+        raise ValueError("frames_with_dets is empty")
+
     h, w = frames_with_dets[0][0].shape[:2]
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
+    frames_per_image = max(1, int(math.ceil(hold_sec * fps)))
+
+    # FFmpeg 파이프 우선
     using_ffmpeg = False
     proc = None
-
+    vw = None
     if shutil.which("ffmpeg"):
         try:
-            # ✅ 입력 프레임레이트 = 1/hold_sec (예: 0.8333fps) → 출력에서 fps로 업샘플
-            input_rate = 1.0 / max(hold_sec, 0.1)
-
             cmd = [
-                "ffmpeg","-y",
-                "-loglevel","error",
-                "-f","rawvideo",
-                "-pix_fmt","bgr24",
+                "ffmpeg", "-y",
+                "-loglevel", "error",
+                "-f", "rawvideo",
+                "-pix_fmt", "bgr24",
                 "-s", f"{w}x{h}",
-                "-r", f"{input_rate}",        # ⬅️ 각 프레임의 간격을 hold_sec로 설정
-                "-i","-",
-                "-vf", f"fps={fps}",          # ⬅️ 출력 fps로 프레임 보간(복제)
-                "-c:v","libx264",
-                "-preset","ultrafast",        # ⬅️ 더 가볍게
-                "-crf","28",                  # ⬅️ 용량↑ 허용 시 더 빠름(23→28)
-                "-pix_fmt","yuv420p",
-                "-movflags","+faststart",
-                out_path
+                "-r", str(fps),         # 입력 fps
+                "-i", "-",              # stdin
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                out_path,
             ]
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
             if proc.stdin is None:
                 raise RuntimeError("failed to open ffmpeg stdin")
             using_ffmpeg = True
         except Exception as e:
-            print("[write_video] ffmpeg open failed:", e)
+            print(f"[write_video] ffmpeg open failed: {e}; fallback to OpenCV")
 
     if not using_ffmpeg:
-        # 폴백(OpenCV) – 여기서는 중복 write 필요 없음(각 프레임 1번만)
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        vw = cv2.VideoWriter(out_path, fourcc, 1.0/hold_sec, (w, h))  # 입력 fps=1/hold_sec
+        vw = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
         if not vw.isOpened():
-            raise RuntimeError("OpenCV VideoWriter open failed")
+            raise RuntimeError(f"OpenCV VideoWriter open failed (size={w}x{h}, fps={fps})")
+
+    # 확대 배율 계산(좌우로 pan할 여유를 줌)
+    # scale = 1 + 2*pan_ratio + zoom_margin  → 좌측 끝~우측 끝까지 이동해도 검은 여백이 안 보이게
+    scale = 1.0 + (2.0 * pan_ratio) + zoom_margin
+    scaled_w = int(round(w * scale))
+    scaled_h = int(round(h * scale))
 
     try:
         for idx, (img_bgr, dets) in enumerate(frames_with_dets):
-            frame = img_bgr.copy()
-            draw_overlay(frame, dets, w, h)
+            # 1) 라벨 먼저 그리기(라벨도 함께 이동하도록)
+            base = img_bgr.copy()
+            draw_overlay(base, dets, w, h)
 
-            if using_ffmpeg:
-                proc.stdin.write(frame.tobytes())  # ✅ 한 번만 write
-            else:
-                vw.write(frame)                     # ✅ 한 번만 write
+            # 2) 확대
+            big = cv2.resize(base, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
+
+            # 3) 좌→우로 패닝(크롭 윈도우를 왼쪽 끝에서 오른쪽 끝으로 이동)
+            extra_w = scaled_w - w          # 가로 여유
+            y0 = (scaled_h - h) // 2        # 세로는 중앙 고정
+
+            for k in range(frames_per_image):
+                t = 0.0 if frames_per_image == 1 else k / (frames_per_image - 1)  # 0→1
+                x0 = int(round(t * extra_w))  # 0(왼쪽) → extra_w(오른쪽)
+
+                # 안전 클램프
+                x0 = max(0, min(extra_w, x0))
+
+                frame = big[y0:y0 + h, x0:x0 + w]
+
+                if using_ffmpeg:
+                    proc.stdin.write(frame.tobytes())
+                else:
+                    vw.write(frame)
 
             if idx % 2 == 0:
-                print(f"[write_video] progress {idx+1}/{len(frames_with_dets)}")
+                print(f"[write_video] {idx+1}/{len(frames_with_dets)} images done "
+                      f"({frames_per_image} frames/image)")
     finally:
         if using_ffmpeg:
-            try: proc.stdin.close()
-            except: pass
-            proc.wait(timeout=30)
-        else:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            rc = proc.wait(timeout=30)
+            if rc != 0:
+                raise RuntimeError(f"ffmpeg exited with code {rc}")
+        elif vw is not None:
             vw.release()
 
 # -------------------------------------------------------
