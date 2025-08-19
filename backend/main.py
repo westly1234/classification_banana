@@ -268,23 +268,33 @@ def _heavy_init():
         print("❌ DB init failed:", e)
 
     try:
-        m = YOLO(MODEL_PATH)
-        m.fuse()                    # ✅ Conv+BN fuse -> CPU에서 이득
-        m.to('cpu')                 # 혹시 모를 디바이스 이동 방지
+        # ONNX 우선 → 없으면 PyTorch .pt 로 폴백
+        if USE_ONNX and MODEL_ONNX.exists():
+            print(f"🔃 Loading ONNX: {MODEL_ONNX}")
+            m = YOLO(str(MODEL_ONNX))         # Ultralytics가 onnxruntime 사용
+        else:
+            print(f"🔃 Loading PyTorch: {MODEL_PATH}")
+            m = YOLO(MODEL_PATH)
+            try:
+                m.fuse()                      # Conv+BN fuse (CPU에서 도움)
+            except Exception:
+                pass
+        m.to('cpu')
         globals()["model"] = m
         MODEL_READY = True
-        print("✅ YOLO loaded")
+        print("✅ YOLO loaded:", "ONNX" if MODEL_ONNX.exists() and USE_ONNX else "PyTorch")
     except Exception as e:
         print("❌ YOLO load failed:", e)
 
-    # ✅ 준비 끝난 뒤 통계 1회 갱신
+    # 스타트업 1회 통계 갱신(실패해도 앱 실행은 계속)
     try:
         db = SessionLocal()
         update_daily_analysis_stat(db, datetime.now(KST).date())
     except Exception as e:
         print("❌ update_daily_analysis_stat at startup:", e)
     finally:
-        db.close()
+        try: db.close()
+        except: pass
 
 # 3-3) 스타트업에서 비동기 시작
 @app.on_event("startup")
@@ -333,6 +343,16 @@ torch.set_num_threads(1 if CPU_CORES <= 2 else 2)
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1 if CPU_CORES <= 2 else 2
 )
+
+# --- 고성능 옵션 ---
+USE_ONNX = os.getenv("USE_ONNX", "1") == "1"        # 기본: ONNX 사용(있으면)
+MODEL_ONNX = (BASE_DIR / "best.onnx")               # 없으면 PyTorch로 폴백
+
+# 배치 추론(파일 여러 장 한 번에). CPU 1~2코어면 2, 4코어면 4 권장
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "2"))
+
+# 프리프로세스 스레드(디코드/리사이즈). CPU 코어에 따라 1~2 권장
+PREPROC_THREADS = 1 if CPU_CORES <= 2 else 2
 
 # 해상도 일관화(모델/전처리/비디오 공통)
 MODEL_W = int(os.getenv("MODEL_W", "640"))
@@ -387,32 +407,42 @@ def letterbox_image(img, target_width, target_height):
     new_img[top:top+nh, left:left+nw] = resized
     return new_img
 
-def run_yolo_np_bgr(img_bgr: np.ndarray, imgsz=None, conf=None, max_det=None):
+def run_yolo_np_bgr(imgs_bgr: List[np.ndarray], imgsz=None, conf=None, max_det=None) -> List[list]:
+    """
+    여러 장을 한 번에 추론해서 list[list[det]] 형태로 반환.
+    각 det 포맷은 run_yolo_np_bgr과 동일.
+    """
     if not model:
         raise HTTPException(status_code=503, detail="모델을 사용할 수 없습니다.")
+    if not imgs_bgr:
+        return []
 
-    h, w = img_bgr.shape[:2]
-    imgsz = imgsz or (w, h)
-    res = model(img_bgr, imgsz=imgsz, conf=(conf or 0.1),
-                max_det=(max_det or 100), verbose=False)[0]
+    # 모델 호출 한 번으로 N개 이미지 처리
+    res_list = model(imgs_bgr, imgsz=(imgsz or imgs_bgr[0].shape[1]),
+                     conf=(conf or 0.1), max_det=(max_det or 100), verbose=False)
 
-    out = []
+    outputs: List[list] = []
     VALID = {"ripe","unripe","freshripe","freshunripe","overripe","rotten"}
-    for box in (res.boxes or []):
-        cls = model.names[int(box.cls.item())]
-        if cls not in VALID: 
-            continue
-        x1,y1,x2,y2 = box.xyxy[0]
-        out.append({
-            "ripeness": KOREAN_CLASSES.get(cls, cls),
-            "confidence": float(box.conf.item()),
-            "freshness": round(FRESHNESS_MAP.get(cls, 0.0), 3),
-            "boundingBox": {
-                "x": round(x1.item()/w,4), "y": round(y1.item()/h,4),
-                "width": round((x2-x1).item()/w,4), "height": round((y2-y1).item()/h,4),
-            },
-        })
-    return out
+
+    for img_bgr, res in zip(imgs_bgr, res_list):
+        h, w = img_bgr.shape[:2]
+        dets: list = []
+        for box in (res.boxes or []):
+            cls = model.names[int(box.cls.item())]
+            if cls not in VALID:
+                continue
+            x1, y1, x2, y2 = box.xyxy[0]
+            dets.append({
+                "ripeness": KOREAN_CLASSES.get(cls, cls),
+                "confidence": float(box.conf.item()),
+                "freshness": round(FRESHNESS_MAP.get(cls, 0.0), 3),
+                "boundingBox": {
+                    "x": round(x1.item() / w, 4), "y": round(y1.item() / h, 4),
+                    "width": round((x2 - x1).item() / w, 4), "height": round((y2 - y1).item() / h, 4),
+                },
+            })
+        outputs.append(dets)
+    return outputs
 
 # --- 🔑 인증 의존성 ---
 async def get_current_user(Authorization: str = Header(None), db: Session = Depends(get_db)):
@@ -604,27 +634,26 @@ def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int =
 
 VIDEO_FPS = _int("VIDEO_FPS", 8)
 HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.5)
+SCROLL_SLOW = float(os.getenv("SCROLL_SLOW", "1.6"))
 # ---------------------------
 # 오버레이(박스/라벨) 그리기
 # ---------------------------
 def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> None:
     """
-    detections: [{boundingBox:{x,y,width,height}, ripeness, confidence}, ...]
-    좌표는 0~1 정규화.
-    박스는 OpenCV, 라벨은 PIL+TTF(한글)로 그립니다.
+    좌표는 0~1 정규화. 박스는 OpenCV, 라벨은 PIL+TTF(한글).
+    라벨은 박스 '위'에 우선 배치, 공간이 없으면 박스 '안쪽' 또는 '아래'로 이동.
     """
     if not detections:
         return
 
-    # 1) 먼저 박스 (OpenCV)
+    # 1) 박스
     for d in detections:
         bb = (d.get("boundingBox") or {})
-        x1 = int((bb.get("x", 0.0)) * w)
-        y1 = int((bb.get("y", 0.0)) * h)
+        x1 = int(bb.get("x", 0.0) * w)
+        y1 = int(bb.get("y", 0.0) * h)
         x2 = int((bb.get("x", 0.0) + bb.get("width", 0.0)) * w)
         y2 = int((bb.get("y", 0.0) + bb.get("height", 0.0)) * h)
 
-        # 경계 클램프
         x1 = max(0, min(w - 1, x1))
         y1 = max(0, min(h - 1, y1))
         x2 = max(x1 + 1, min(w, x2))
@@ -632,67 +661,70 @@ def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> Non
 
         cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 3)
 
-    # 2) 라벨 (PIL + 한글 폰트)
-    #    RGBA로 변환해서 반투명 배경을 올린 뒤 다시 BGR로 되돌립니다.
+    # 2) 라벨 (PIL)
     img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
     draw = ImageDraw.Draw(img)
-    font = _get_font(22)  # <- 너가 만든 폰트 캐시 함수 사용
+    font = _get_font(22)
 
     for d in detections:
         bb = (d.get("boundingBox") or {})
-        x1 = int((bb.get("x", 0.0)) * w)
-        y1 = int((bb.get("y", 0.0)) * h)
+        x1 = int(bb.get("x", 0.0) * w)
+        y1 = int(bb.get("y", 0.0) * h)
 
         ripeness = d.get("ripeness", "")
         conf_pct = float(d.get("confidence", 0.0)) * 100.0
         label = f"{ripeness} {conf_pct:.1f}%"
 
-        # 텍스트 크기
         l, t, r, b = draw.textbbox((0, 0), label, font=font)
         tw, th = (r - l), (b - t)
-
         pad = 6
-        box_w = tw + pad * 2
-        box_h = th + pad * 2
+        box_w, box_h = tw + pad * 2, th + pad * 2
 
-        # 박스가 프레임을 넘지 않도록 시작점(x, y_top) 재조정
         x = max(0, min(w - box_w, x1))
-        y_top = max(0, y1 - box_h - 2)  # 텍스트 박스는 박스 위쪽에
 
-        # 반투명 배경
+        # ① 위에 놓을 공간이 있으면 위로
+        if y1 - box_h - 2 >= 0:
+            y_top = y1 - box_h - 2
+        # ② 박스 내부에 들어가면 내부(가독성 좋음)
+        elif y1 + 2 + box_h <= h:
+            y_top = y1 + 2
+        # ③ 그래도 안 되면 맨 아래에 붙이기
+        else:
+            y_top = max(0, h - box_h)
+
         bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
-        img.paste(bg, (x, y_top), bg)  # mask로 알파 사용
-
-        # 텍스트
+        img.paste(bg, (x, y_top), bg)
         draw.text((x + pad, y_top + pad), label, font=font, fill=(255, 255, 255, 255))
 
-    # 3) 되돌리기 (in-place 갱신)
     frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
         
 # ---------------------------------------
 # 비디오 작성: 좌→우 패닝(확대 + 이동)으로 실시간 스캔 느낌
 # ---------------------------------------
-TILE_PAD = int(os.getenv("TILE_PAD", "12"))
+TILE_PAD = int(os.getenv("TILE_PAD", "0"))
 
-def _pad_sides(img_bgr: np.ndarray, pad: int = TILE_PAD) -> np.ndarray:
-    return cv2.copyMakeBorder(img_bgr, 0, 0, pad, pad, cv2.BORDER_CONSTANT, value=(0,0,0))
+# --- 여백 없이 정사이즈로 맞추기(cover)
+def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
+    h, w = img_bgr.shape[:2]
+    if w == 0 or h == 0:
+        raise ValueError("invalid image size")
+    scale = max(out_w / w, out_h / h)  # 빈 공간 없이 채우도록
+    nw, nh = int(round(w * scale)), int(round(h * scale))
+    resized = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    x1 = max(0, (nw - out_w) // 2)
+    y1 = max(0, (nh - out_h) // 2)
+    return resized[y1:y1 + out_h, x1:x1 + out_w].copy()
 
 def make_long_strip(frames_with_dets: List[Tuple[np.ndarray, list]], out_w: int, out_h: int) -> np.ndarray:
-    """
-    각 프레임에 라벨을 그리고(한글), 좌우 패딩 후 가로로 연결.
-    결과 long_img.shape == (out_h, out_w * N + padding*2*N, 3)
-    """
     tiles = []
     for img_bgr, dets in frames_with_dets:
-        h, w = img_bgr.shape[:2]
-        # 안전: 사이즈 불일치 시 리사이즈
-        if (w, h) != (out_w, out_h):
-            img_bgr = cv2.resize(img_bgr, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-        # 오버레이
+        # 여백 없는 리사이즈
+        if img_bgr.shape[1] != out_w or img_bgr.shape[0] != out_h:
+            img_bgr = resize_cover(img_bgr, out_w, out_h)
+
         canvas = img_bgr.copy()
         draw_overlay(canvas, dets, out_w, out_h)
-        # 좌우 패딩 후 추가
-        tiles.append(_pad_sides(canvas, pad=12))
+        tiles.append(canvas)        # ⬅️ 패딩 없이 바로 이어붙임
 
     long_img = np.hstack(tiles) if tiles else np.zeros((out_h, out_w, 3), dtype=np.uint8)
     return long_img
@@ -717,8 +749,8 @@ def write_video(
     long_img = make_long_strip(frames_with_dets, out_w, out_h)
     H, L = long_img.shape[0], long_img.shape[1]
 
-    start_dx = TILE_PAD
-    end_dx   = max(start_dx, L - out_w - TILE_PAD)
+    start_dx = 0
+    end_dx   = max(0, L - out_w)
 
     if L <= out_w:
         # 이동 여지가 없으면 그냥 정지 비디오
@@ -726,7 +758,7 @@ def write_video(
         frames = [long_img[:, 0:out_w]] * scroll_frames * len(frames_with_dets)
     else:
         # 전체 스크롤 프레임 수 = 이미지 수 * (hold_sec * fps)
-        total_frames = max(1, int(math.ceil(len(frames_with_dets) * hold_sec * fps)))
+        total_frames = max(1, int(math.ceil(len(frames_with_dets) * hold_sec * fps * SCROLL_SLOW)))
         frames = []
         for i in range(total_frames):
             t = i / (total_frames - 1) if total_frames > 1 else 0.0  # 0→1
@@ -977,28 +1009,31 @@ async def start_video_analysis(
     # 3) 백그라운드: 나머지 프레임을 하나씩 감지하면서 DB에 "점진 갱신" + 마지막에 비디오 생성
     def bg_finish_and_render():
         try:
-            # 파일명 기준으로 결과를 빠르게 찾기 위해 map 구성
-            # (주의: 최종 image_results 정렬은 decoded 순서를 유지)
             name_to_result = {r["filename"]: r for r in image_results}
 
-            # 이미 처리된 FAST_PREVIEW는 그대로 두고, 나머지 이미지만 순차 감지
-            for idx, (fname, bgr) in enumerate(decoded):
-                if name_to_result.get(fname, {}).get("detections"):
-                    continue  # 이미 채워진 썸네일(FAST_PREVIEW)
+            # 아직 비어있는 항목들만 추출(원래 순서 유지)
+            pending = [(fname, bgr) for (fname, bgr) in decoded
+                    if not name_to_result.get(fname, {}).get("detections")]
 
-                dets = run_yolo_np_bgr(bgr)  # CPU 1코어 환경에선 순차가 가장 안정적
-                avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
+            # 배치 추론
+            for i in range(0, len(pending), max(1, BATCH_SIZE)):
+                batch = pending[i:i + BATCH_SIZE]
+                batch_imgs = [bgr for (_, bgr) in batch]
+                batch_names = [fname for (fname, _) in batch]
 
-                # 현재 항목 갱신
-                name_to_result[fname] = {
-                    "filename": fname,
-                    "detections": dets,
-                    "avg_confidence": avg_conf
-                }
+                # 한번에 N개 추론
+                det_lists = run_yolo_np_bgr(batch_imgs, imgsz=FINAL_IMGSZ, conf=FINAL_CONF, max_det=100)
 
-                # 🔁 여기서 "증분 저장" — 프런트 폴링이 있으면 썸네일이 한 장씩 채워짐
+                # 결과 합치고 DB에 증분 저장
+                for fname, dets in zip(batch_names, det_lists):
+                    avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
+                    name_to_result[fname] = {
+                        "filename": fname,
+                        "detections": dets,
+                        "avg_confidence": avg_conf
+                    }
+
                 with SessionLocal() as db:
-                    # decoded 순서로 다시 리스트 구성(정렬 보장)
                     sorted_results = [name_to_result[p] for p, _ in decoded]
                     set_task_db(db, task_id, status="PROCESSING", image_results=sorted_results)
 
@@ -1008,7 +1043,7 @@ async def start_video_analysis(
                 dets = name_to_result[fname]["detections"]
                 filled.append((bgr, dets))
 
-            # 비디오 생성(이 함수 안에서 상태 SUCCESS/FAILURE 업데이트)
+            # 비디오 생성(상태는 이 함수 안에서 SUCCESS/FAILURE로 마무리)
             create_analysis_video(current_user, task_id, filled)
 
         except Exception as e:
@@ -1100,7 +1135,7 @@ def get_stats(db: Session = Depends(get_db)):
     # ✅ 통계 테이블에서 오늘자 데이터 가져옴
     today_stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == today).first()
 
-    box_row = db.query(DailyBoxCount).filter(DailyBoxCount.date == today).first()
+    box_row = db.query(DailyBoxCount).get(today)
     ripeness_counts = json.loads(box_row.counts_json or "{}") if box_row else {}
 
     if not today_stat:
@@ -1193,14 +1228,20 @@ def get_summary_stats():
             Analysis.created_at < today_start
         ).scalar()
 
-        box_row = db.query(DailyBoxCount).filter(DailyBoxCount.date == today).first()
-        ripeness_counts = json.loads(box_row.counts_json or "{}") if box_row else {}
+        box_today = db.query(DailyBoxCount).get(today)
+        today_box = json.loads(box_today.counts_json or "{}") if box_today else {}
+        # 파이차트 데이터
+        ripeness_counts = {k: int(v) for k, v in today_box.items() if k != "비디오분석"}
+        # 다양성(>0 인 클래스 수)
+        today_variety = sum(1 for v in ripeness_counts.values() if int(v) > 0)
 
-        # 어제까지 숙성종류 수
-        yest_end = datetime.combine(yesterday, dtime.max).astimezone(KST)
-        ripeness_types_yesterday = db.query(func.count(func.distinct(Analysis.ripeness))).filter(
-            Analysis.created_at <= yest_end
-        ).scalar()
+        # ✅ 어제 다양성도 DailyBoxCount 기준으로
+        box_yest = db.query(DailyBoxCount).get(yesterday)
+        yest_box = json.loads(box_yest.counts_json or "{}") if box_yest else {}
+        yesterday_variety = sum(
+            1 for k, v in yest_box.items()
+            if k != "비디오분석" and int(v) > 0
+        )
 
         # 정확도 값 안전 처리
         acc_today = round(today_stat.accuracy or 0, 2) if today_stat else 0.0
@@ -1213,14 +1254,18 @@ def get_summary_stats():
             "yesterday": yest_stat.total_count if yest_stat else 0,
             "total": total_count,
             "total_before_today": total_before_today,
+
+            # ✅ 파이차트: 박스 기준
             "ripeness_counts": ripeness_counts,
-            "ripeness_types_yesterday": ripeness_types_yesterday,
+
+            # ✅ 다양성: 박스 기준(오늘/어제)
+            "today_variety": today_variety,
+            "yesterday_variety": yesterday_variety,
+
             "avg_confidence_today": acc_today,
             "avg_confidence_yesterday": acc_yest,
             "avg_freshness_today": fresh_today,
             "avg_freshness_yesterday": fresh_yest,
-            "today_variety": today_stat.variety_count if today_stat else 0,
-            "yesterday_variety": yest_stat.variety_count if yest_stat else 0,
         }
 
     except Exception as e:
