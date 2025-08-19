@@ -15,7 +15,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # FastAPI 및 관련 라이브러리
-from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.responses import FileResponse
@@ -373,7 +373,7 @@ MAX_BYTES = int(os.getenv("MAX_BYTES", str(10*1024*1024)))    # 10MB/파일
 
 #  비디오 생성(멀티 이미지) 최적화 + 해상도 키우기
 INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
-VIDEO_FPS = int(os.getenv("VIDEO_FPS", "6"))
+VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
 SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
 
 # 감지 파라미터
@@ -654,7 +654,6 @@ def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int =
         raise ValueError("이미지 디코딩 실패")
     return letterbox_image(img, dst_w, dst_h)  # BGR
 
-VIDEO_FPS = _int("VIDEO_FPS", 8)
 HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.5)
 SCROLL_SLOW = float(os.getenv("SCROLL_SLOW", "1.6"))
 # ---------------------------
@@ -1162,6 +1161,15 @@ async def get_task_status(task_id: str, request: Request):
         "absolute_result": absolute_result,
         "image_results": task.get("image_results", []),
     }
+
+@task_router.get("/{task_id}")
+async def get_task_status_compat(task_id: str, request: Request):
+    return await get_task_status(task_id, request)
+
+@task_router.options("/{task_id}")
+@task_router.options("/{task_id}/status")
+def _cors_preflight_ok(task_id: str):
+    return Response(status_code=200)
 
 # --- 통계 라우터 ---
 @stats_router.get("/", response_model=dict)
