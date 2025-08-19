@@ -185,20 +185,24 @@ admin.add_view(UserAdmin)
 admin.add_view(AnalysisAdmin)
 
 # --- CORS 설정 ---
-FRONT_REGEX = re.compile(r"^https://classification-banana[\w\-]*\.onrender\.com$")
+FRONT_EXACT = [
+    "https://classification-banana.onrender.com",
+    "https://classification-banana-2.onrender.com",
+    "http://localhost:5173",
+]
+FRONT_REGEX = r"^https://classification-banana(?:-\d+)?\.onrender\.com$"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://classification-banana-2.onrender.com",
-    ],
-    allow_origin_regex=FRONT_REGEX,
+    allow_origins=FRONT_EXACT,            # 정확 매칭 우선
+    allow_origin_regex=FRONT_REGEX,       # 1,2,... 번호가 바뀌어도 허용
     allow_credentials=True,
-    allow_methods=["GET","POST","OPTIONS"],
-    allow_headers=["*"],
-    max_age=600,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    expose_headers=["Content-Type", "Cache-Control", "Content-Disposition"],
+    max_age=86400,                        # 프리플라이트 24h 캐시
 )
+
 
 # ✅ 세션 쿠키 보안 옵션 (SQLAdmin용)
 https_only = os.getenv("ENV", "prod") == "prod"
@@ -431,14 +435,13 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
         imgs = list(imgs_bgr)
 
     if not imgs:
-        return [] if not single_input else []
+        return [] if single_input else []
 
-    # 모델 호출
     res_list = model(
-        imgs, 
-        imgsz=(imgsz or imgs[0].shape[1]), 
-        conf=(conf or 0.1), 
-        max_det=(max_det or 100), 
+        imgs,
+        imgsz=(imgsz or imgs[0].shape[1]),
+        conf=(conf or 0.1),
+        max_det=(max_det or 100),
         verbose=False
     )
 
@@ -452,14 +455,29 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
             cls = model.names[int(box.cls.item())]
             if cls not in VALID:
                 continue
+
             x1, y1, x2, y2 = box.xyxy[0]
+            # 정규화 + 안전 클램프
+            nx = float(x1.item() / w)
+            ny = float(y1.item() / h)
+            nw = float((x2 - x1).item() / w)
+            nh = float((y2 - y1).item() / h)
+
+            # 0~1 범위 보정 (우측/하단 넘침 방지)
+            nx = max(0.0, min(1.0, nx))
+            ny = max(0.0, min(1.0, ny))
+            nw = max(0.0, min(1.0 - nx, nw))
+            nh = max(0.0, min(1.0 - ny, nh))
+
             dets.append({
                 "ripeness": KOREAN_CLASSES.get(cls, cls),
                 "confidence": float(box.conf.item()),
                 "freshness": round(FRESHNESS_MAP.get(cls, 0.0), 3),
                 "boundingBox": {
-                    "x": round(x1.item()/w,4), "y": round(y1.item()/h,4),
-                    "width": round((x2-x1).item()/w,4), "height": round((y2-y1).item()/h,4),
+                    "x": round(nx, 4),
+                    "y": round(ny, 4),
+                    "width": round(nw, 4),
+                    "height": round(nh, 4),
                 },
             })
         outputs.append(dets)
@@ -928,23 +946,32 @@ def get_result_file(filename: str):
     )
 
 # --- 분석 라우터 (모든 API에 인증 필요) ---
+def decode_bgr(img_bytes: bytes) -> np.ndarray:
+    arr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("이미지 디코딩 실패")
+    return img
+
 @analysis_router.post("/analyze")
 async def analyze_single_image(payload: ImagePayload, current_user: User = Depends(get_current_user)):
     if not MODEL_READY or model is None:
         raise HTTPException(status_code=503, detail="모델이 준비 중입니다. 잠시 후 다시 시도해주세요.")
     try:
         img_bytes = base64.b64decode(payload.image)
-        # 1) 빠른 디코드 + 레터박스(동기 OK)
-        img_bgr = safe_decode_and_resize(img_bytes, MODEL_W, MODEL_H)
 
-        # 2) 추론만 스레드풀로
+        # ✅ 원본으로 디코드 (letterbox 사용 X)
+        img_bgr = decode_bgr(img_bytes)
+
         loop = asyncio.get_running_loop()
+
+        # run_yolo_np_bgr 이 단일 이미지 버전이면 그대로,
+        # 배치(List[np.ndarray]) 버전이면 [img_bgr][0] 으로 꺼내세요.
         detections = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, img_bgr)
 
         avg_conf = round((sum(d["confidence"] for d in detections) / len(detections)) if detections else 0.0, 4)
         avg_fresh = round((sum(d["freshness"] for d in detections) / len(detections)) if detections else 0.0, 4)
 
-        # DB 저장(동일)
         db = SessionLocal()
         try:
             db.add(Analysis(
@@ -954,7 +981,6 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
                 image_blob=img_bytes, created_at=datetime.now(KST)
             ))
             increment_daily_box_counts(db, detections)
-
             db.commit()
             update_daily_analysis_stat(db, datetime.now(KST).date())
         finally:

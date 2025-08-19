@@ -26,10 +26,20 @@ const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("access_token");
-  if (token) {
-    config.headers = config.headers ?? {};
-    (config.headers as any).Authorization = `Bearer ${token}`;
+  const url = (config.url ?? '').toString();
+
+  // 토큰이 필요 없는 경로(폴링, 핑, 공개 설정 등)는 Authorization 헤더를 붙이지 않음
+  const NO_AUTH =
+    url.startsWith('/tasks/') ||
+    url.startsWith('/ping') ||
+    url.startsWith('/settings');
+
+  if (!NO_AUTH) {
+    const token = localStorage.getItem('access_token');
+    if (token) {
+      config.headers = config.headers ?? {};
+      (config.headers as any).Authorization = `Bearer ${token}`;
+    }
   }
   return config;
 });

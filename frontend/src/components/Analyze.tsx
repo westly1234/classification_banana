@@ -631,30 +631,36 @@ export default function Analyze() {
                       className="w-full h-full object-cover"
                     />
 
-                    {state.result?.map((det, i) => (
-                      <div
-                        key={i}
-                        className="absolute border-[3px] md:border-4 border-yellow-400 rounded-sm"
-                        style={{
-                          left: `${det.boundingBox.x * 100}%`,
-                          top: `${det.boundingBox.y * 100}%`,
-                          width: `${det.boundingBox.width * 100}%`,
-                          height: `${det.boundingBox.height * 100}%`,
-                        }}
-                      >
+                    {state.result?.map((det, i) => {
+                      const b = det.boundingBox;
+                      const x = Math.max(0, Math.min(1, b.x));
+                      const y = Math.max(0, Math.min(1, b.y));
+                      const w = Math.max(0, Math.min(1 - x, b.width));
+                      const h = Math.max(0, Math.min(1 - y, b.height));
+                      return (
                         <div
-                          className="absolute bg-black/80 text-white text-[10px] sm:text-xs px-1.5 rounded font-semibold whitespace-nowrap"
+                          key={i}
+                          className="absolute border-[3px] md:border-4 border-yellow-400 rounded-sm"
                           style={{
-                            left: 0,
-                            top: Math.max(0, -1 + 0),   // 필요 시 고정 라벨 높이만큼 더 내리고 싶으면 숫자(예: 18) 사용
+                            left: `${x * 100}%`,
+                            top: `${y * 100}%`,
+                            width: `${w * 100}%`,
+                            height: `${h * 100}%`,
                           }}
                         >
-                          {det.ripeness} {Number((det.confidence * 100).toFixed(1))}%
+                          <div
+                            className="absolute bg-black/80 text-white text-[10px] sm:text-xs px-1.5 rounded font-semibold whitespace-nowrap"
+                            style={{
+                              left: 0,
+                              top: Math.max(0, -1 + 0),   // 필요 시 고정 라벨 높이만큼 더 내리고 싶으면 숫자(예: 18) 사용
+                            }}
+                          >
+                            {det.ripeness} {Number((det.confidence * 100).toFixed(1))}%
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
-
                   {state.error && (
                     <div className="absolute inset-0 bg-red-700/80 text-xs text-white font-bold flex items-center justify-center">
                       {state.error}
