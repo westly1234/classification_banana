@@ -345,7 +345,7 @@ INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
 VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
 SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
 
-# 한글 폰트 경로: 환경변수 우선, 없으면 프로젝트 상대 경로로 폴백
+# 한글 폰트 경로: 환경변수 우선, 없으면 프로젝트 상대 경로
 FONT_PATH = os.getenv(
     "FONT_PATH",
     str((Path(__file__).parent / "fonts" / "NanumGothic.ttf").resolve())
@@ -353,29 +353,41 @@ FONT_PATH = os.getenv(
 _font_cache = {}
 
 def _get_font(size: int = 24):
-    """사이즈별 캐시"""
     if size not in _font_cache:
         try:
             _font_cache[size] = ImageFont.truetype(FONT_PATH, size=size)
         except Exception:
-            _font_cache[size] = ImageFont.load_default()  # 폴백(영문 전용)
+            _font_cache[size] = ImageFont.load_default()  # (한글 미지원일 수 있음)
     return _font_cache[size]
 
 def _put_korean_text_bgr(frame_bgr: np.ndarray, text: str, x: int, y: int, font_size: int = 24) -> np.ndarray:
-    """(x,y) 기준 왼쪽-아래 정렬로 검은 배경 + 흰 글씨(한글 지원)를 그려서 BGR 프레임 반환"""
+    """
+    (x,y)는 왼쪽-아래 정렬 기준점.
+    검은 배경 + 흰 글씨(한글 지원)으로 그리고 BGR 프레임을 반환.
+    """
+    h, w = frame_bgr.shape[:2]
     img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
     draw = ImageDraw.Draw(img)
     font = _get_font(font_size)
-    # 텍스트 크기
+
+    # 텍스트 박스 크기
     l, t, r, b = draw.textbbox((0, 0), text, font=font)
     tw, th = r - l, b - t
     pad = 6
-    y_top = max(0, y - th - 8)
-    # 반투명 배경
-    bg = Image.new("RGBA", (tw + pad * 2, th + pad * 2), (0, 0, 0, 210))
-    img.alpha_composite(bg, (x, y_top))
+
+    # 경계 클램프 (오른쪽/아랫쪽 나가지 않게)
+    box_w = tw + pad * 2
+    box_h = th + pad * 2
+    x = max(0, min(w - box_w, x))
+    y_top = max(0, y - box_h - 2)
+
+    # 반투명 배경(알파 포함) 그리기: paste + 자체 알파 사용 → 버전 호환
+    bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
+    img.paste(bg, (x, y_top), bg)
+
     # 텍스트
     draw.text((x + pad, y_top + pad), text, font=font, fill=(255, 255, 255, 255))
+
     # 되돌리기
     return cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
@@ -644,57 +656,126 @@ def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> Non
     """
     detections: [{boundingBox:{x,y,width,height}, ripeness, confidence}, ...]
     좌표는 0~1 정규화.
-    프레임을 제자리(in-place)로 수정.
+    박스는 OpenCV, 라벨은 PIL+TTF(한글)로 그립니다.
     """
-    for d in (detections or []):
-        bb = d.get("boundingBox", {})
+    if not detections:
+        return
 
-        # 정규화 -> 픽셀
-        x1 = int(bb.get("x", 0.0) * w)
-        y1 = int(bb.get("y", 0.0) * h)
+    # 1) 먼저 박스 (OpenCV)
+    for d in detections:
+        bb = (d.get("boundingBox") or {})
+        x1 = int((bb.get("x", 0.0)) * w)
+        y1 = int((bb.get("y", 0.0)) * h)
         x2 = int((bb.get("x", 0.0) + bb.get("width", 0.0)) * w)
         y2 = int((bb.get("y", 0.0) + bb.get("height", 0.0)) * h)
 
-        # 프레임 경계 클램프
+        # 경계 클램프
         x1 = max(0, min(w - 1, x1))
         y1 = max(0, min(h - 1, y1))
         x2 = max(x1 + 1, min(w, x2))
         y2 = max(y1 + 1, min(h, y2))
 
-        # 박스
         cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 3)
 
-        # 라벨(클래스 + 정확도) — run_yolo_np_bgr에서 이미 한국어로 매핑됨
-        ripeness = d.get("ripeness", "")
-        conf = float(d.get("confidence", 0.0)) * 100.0
-        label = f"{ripeness} {conf:.1f}%"
+    # 2) 라벨 (PIL + 한글 폰트)
+    #    RGBA로 변환해서 반투명 배경을 올린 뒤 다시 BGR로 되돌립니다.
+    img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    draw = ImageDraw.Draw(img)
+    font = _get_font(22)  # <- 너가 만든 폰트 캐시 함수 사용
 
-        # OpenCV 텍스트 대신, PIL로 한글 렌더링 후 제자리 반영
-        updated = _put_korean_text_bgr(frame_bgr, label, x1, y1, font_size=24)
-        frame_bgr[:] = updated  # in-place 유지
+    for d in detections:
+        bb = (d.get("boundingBox") or {})
+        x1 = int((bb.get("x", 0.0)) * w)
+        y1 = int((bb.get("y", 0.0)) * h)
+
+        ripeness = d.get("ripeness", "")
+        conf_pct = float(d.get("confidence", 0.0)) * 100.0
+        label = f"{ripeness} {conf_pct:.1f}%"
+
+        # 텍스트 크기
+        l, t, r, b = draw.textbbox((0, 0), label, font=font)
+        tw, th = (r - l), (b - t)
+
+        pad = 6
+        box_w = tw + pad * 2
+        box_h = th + pad * 2
+
+        # 박스가 프레임을 넘지 않도록 시작점(x, y_top) 재조정
+        x = max(0, min(w - box_w, x1))
+        y_top = max(0, y1 - box_h - 2)  # 텍스트 박스는 박스 위쪽에
+
+        # 반투명 배경
+        bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
+        img.paste(bg, (x, y_top), bg)  # mask로 알파 사용
+
+        # 텍스트
+        draw.text((x + pad, y_top + pad), label, font=font, fill=(255, 255, 255, 255))
+
+    # 3) 되돌리기 (in-place 갱신)
+    frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
         
 # ---------------------------------------
 # 비디오 작성: 좌→우 패닝(확대 + 이동)으로 실시간 스캔 느낌
 # ---------------------------------------
+def _pad_sides(img_bgr: np.ndarray, pad: int = 12) -> np.ndarray:
+    return cv2.copyMakeBorder(img_bgr, 0, 0, pad, pad, cv2.BORDER_CONSTANT, value=(0,0,0))
+
+def make_long_strip(frames_with_dets: List[Tuple[np.ndarray, list]], out_w: int, out_h: int) -> np.ndarray:
+    """
+    각 프레임에 라벨을 그리고(한글), 좌우 패딩 후 가로로 연결.
+    결과 long_img.shape == (out_h, out_w * N + padding*2*N, 3)
+    """
+    tiles = []
+    for img_bgr, dets in frames_with_dets:
+        h, w = img_bgr.shape[:2]
+        # 안전: 사이즈 불일치 시 리사이즈
+        if (w, h) != (out_w, out_h):
+            img_bgr = cv2.resize(img_bgr, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+        # 오버레이
+        canvas = img_bgr.copy()
+        draw_overlay(canvas, dets, out_w, out_h)
+        # 좌우 패딩 후 추가
+        tiles.append(_pad_sides(canvas, pad=12))
+
+    long_img = np.hstack(tiles) if tiles else np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    return long_img
+
 def write_video(
     frames_with_dets: List[Tuple[np.ndarray, list]],
     out_path: str,
-    fps: int = VIDEO_FPS,          # 예: 8
-    hold_sec: float = HOLD_SEC,    # 한 이미지당 재생 시간(초)
-    pan_ratio: float = 0.10,       # 가로의 10% 만큼 좌→우로 이동
-    zoom_margin: float = 0.02      # 테두리 안 보이게 여유 확대
+    fps: int = VIDEO_FPS,              # 예: 8
+    hold_sec: float = SECONDS_PER_IMAGE  # 이미지 1장 당 보여줄 시간(초)
 ) -> None:
     """
-    - 각 이미지에 대해: 라벨을 먼저 그린 뒤, 확대+좌우 패닝으로 N=ceil(hold_sec*fps) 프레임 생성.
-    - YOLO는 반복 실행하지 않음(가볍고 빠름).
+    1) 모든 이미지를 (TARGET_W, TARGET_H)로 맞춘 타일로 만들고 라벨을 그린 뒤,
+    2) 가로로 이어붙여 long_img 생성,
+    3) long_img를 좌→우로 일정 속도로 스크롤하면서 비디오 생성.
     """
     if not frames_with_dets:
         raise ValueError("frames_with_dets is empty")
 
-    h, w = frames_with_dets[0][0].shape[:2]
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    out_w = TARGET_W
+    out_h = TARGET_H
 
-    frames_per_image = max(1, int(math.ceil(hold_sec * fps)))
+    long_img = make_long_strip(frames_with_dets, out_w, out_h)
+    H, L = long_img.shape[0], long_img.shape[1]
+    if L <= out_w:
+        # 이동 여지가 없으면 그냥 정지 비디오
+        scroll_frames = max(1, int(math.ceil(hold_sec * fps)))
+        frames = [long_img[:, 0:out_w]] * scroll_frames * len(frames_with_dets)
+    else:
+        # 전체 스크롤 프레임 수 = 이미지 수 * (hold_sec * fps)
+        total_frames = max(1, int(math.ceil(len(frames_with_dets) * hold_sec * fps)))
+        frames = []
+        for i in range(total_frames):
+            t = i / (total_frames - 1) if total_frames > 1 else 0.0  # 0→1
+            dx = int(round(t * (L - out_w)))  # 왼→오
+            crop = long_img[:, dx:dx + out_w]
+            if crop.shape[1] < out_w:
+                # 우측 끝에서 부족하면 패딩
+                pad = out_w - crop.shape[1]
+                crop = cv2.copyMakeBorder(crop, 0, 0, 0, pad, cv2.BORDER_CONSTANT, value=(0,0,0))
+            frames.append(crop)
 
     # FFmpeg 파이프 우선
     using_ffmpeg = False
@@ -703,24 +784,16 @@ def write_video(
     if shutil.which("ffmpeg"):
         try:
             cmd = [
-                "ffmpeg", "-y",
-                "-loglevel", "error",
-                "-f", "rawvideo",
-                "-pix_fmt", "bgr24",
-                "-s", f"{w}x{h}",
-                "-r", str(fps),         # 입력 fps
-                "-i", "-",              # stdin
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "23",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                out_path,
+                "ffmpeg","-y","-loglevel","error",
+                "-f","rawvideo","-pix_fmt","bgr24",
+                "-s", f"{out_w}x{out_h}",
+                "-r", str(fps), "-i","-",
+                "-c:v","libx264","-preset","veryfast","-crf","23",
+                "-pix_fmt","yuv420p","-movflags","+faststart",
+                out_path
             ]
-            proc = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if proc.stdin is None:
                 raise RuntimeError("failed to open ffmpeg stdin")
             using_ffmpeg = True
@@ -729,52 +802,22 @@ def write_video(
 
     if not using_ffmpeg:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        vw = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+        vw = cv2.VideoWriter(out_path, fourcc, fps, (out_w, out_h))
         if not vw.isOpened():
-            raise RuntimeError(f"OpenCV VideoWriter open failed (size={w}x{h}, fps={fps})")
-
-    # 확대 배율 계산(좌우로 pan할 여유를 줌)
-    # scale = 1 + 2*pan_ratio + zoom_margin  → 좌측 끝~우측 끝까지 이동해도 검은 여백이 안 보이게
-    scale = 1.0 + (2.0 * pan_ratio) + zoom_margin
-    scaled_w = int(round(w * scale))
-    scaled_h = int(round(h * scale))
+            raise RuntimeError(f"OpenCV VideoWriter open failed ({out_w}x{out_h}@{fps})")
 
     try:
-        for idx, (img_bgr, dets) in enumerate(frames_with_dets):
-            # 1) 라벨 먼저 그리기(라벨도 함께 이동하도록)
-            base = img_bgr.copy()
-            draw_overlay(base, dets, w, h)
-
-            # 2) 확대
-            big = cv2.resize(base, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
-
-            # 3) 좌→우로 패닝(크롭 윈도우를 왼쪽 끝에서 오른쪽 끝으로 이동)
-            extra_w = scaled_w - w          # 가로 여유
-            y0 = (scaled_h - h) // 2        # 세로는 중앙 고정
-
-            for k in range(frames_per_image):
-                t = 0.0 if frames_per_image == 1 else k / (frames_per_image - 1)  # 0→1
-                x0 = int(round(t * extra_w))  # 0(왼쪽) → extra_w(오른쪽)
-
-                # 안전 클램프
-                x0 = max(0, min(extra_w, x0))
-
-                frame = big[y0:y0 + h, x0:x0 + w]
-
-                if using_ffmpeg:
-                    proc.stdin.write(frame.tobytes())
-                else:
-                    vw.write(frame)
-
-            if idx % 2 == 0:
-                print(f"[write_video] {idx+1}/{len(frames_with_dets)} images done "
-                      f"({frames_per_image} frames/image)")
+        for i, fr in enumerate(frames):
+            if using_ffmpeg:
+                proc.stdin.write(fr.tobytes())
+            else:
+                vw.write(fr)
+            if i % 10 == 0:
+                print(f"[write_video] frame {i+1}/{len(frames)}")
     finally:
         if using_ffmpeg:
-            try:
-                proc.stdin.close()
-            except Exception:
-                pass
+            try: proc.stdin.close()
+            except Exception: pass
             rc = proc.wait(timeout=30)
             if rc != 0:
                 raise RuntimeError(f"ffmpeg exited with code {rc}")
