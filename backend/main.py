@@ -664,13 +664,12 @@ def update_daily_analysis_stat(db: Session, target_date: date):
     db.commit() 
 
 # --- 📹 비동기 작업 및 동영상 생성 ---
-def safe_decode_and_resize(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int = TARGET_H) -> np.ndarray:
-    """빠른 디코딩 + 레터박스 (BGR 반환)"""
+def decode_and_cover(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int = TARGET_H) -> np.ndarray:
     arr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("이미지 디코딩 실패")
-    return letterbox_image(img, dst_w, dst_h)  # BGR
+    return resize_cover(img, dst_w, dst_h)
 
 HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.5)
 SCROLL_SLOW = float(os.getenv("SCROLL_SLOW", "1.6"))
@@ -757,16 +756,15 @@ def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
 def make_long_strip(frames_with_dets: List[Tuple[np.ndarray, list]], out_w: int, out_h: int) -> np.ndarray:
     tiles = []
     for img_bgr, dets in frames_with_dets:
-        # 여백 없는 리사이즈
+        # 이미 (out_w,out_h)이면 그대로, 아니면 한 번만 보정
         if img_bgr.shape[1] != out_w or img_bgr.shape[0] != out_h:
             img_bgr = resize_cover(img_bgr, out_w, out_h)
 
         canvas = img_bgr.copy()
         draw_overlay(canvas, dets, out_w, out_h)
-        tiles.append(canvas)        # ⬅️ 패딩 없이 바로 이어붙임
+        tiles.append(canvas)
 
-    long_img = np.hstack(tiles) if tiles else np.zeros((out_h, out_w, 3), dtype=np.uint8)
-    return long_img
+    return np.hstack(tiles) if tiles else np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
 def write_video(
     frames_with_dets: List[Tuple[np.ndarray, list]],
@@ -993,7 +991,7 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
         raise HTTPException(status_code=500, detail=f"이미지 분석 중 오류: {e}")
 
 # 앞의 N장만 즉시 추론
-FAST_PREVIEW = 2  
+FAST_PREVIEW = 2
 
 @analysis_router.post("/analyze_video")
 async def start_video_analysis(
@@ -1011,20 +1009,20 @@ async def start_video_analysis(
 
     loop = asyncio.get_running_loop()
 
-    # 0) 업로드는 최대한 빨리 디스크에만 저장 (디코드 X)
+    # 0) 업로드만 디스크에 저장
     task_root = TASKS_DIR / task_id
     orig_dir  = task_root / "orig"
     orig_dir.mkdir(parents=True, exist_ok=True)
 
     manifest: list[dict] = []        # [{'filename':..., 'path':...}]
-    image_results: list[dict] = []   # 프론트 썸네일 상태
+    image_results: list[dict] = []   # 프리뷰/폴링용 결과
 
     for f in files[:MAX_FILES]:
         dst = orig_dir / f.filename
         size = 0
         with open(dst, "wb") as out:
             while True:
-                chunk = await f.read(1024 * 1024)  # 1MB씩
+                chunk = await f.read(1024 * 1024)
                 if not chunk:
                     break
                 size += len(chunk)
@@ -1047,7 +1045,7 @@ async def start_video_analysis(
             set_task_db(db, task_id, status="FAILURE", result="유효한 이미지가 없습니다.", image_results=image_results)
         return {"task_id": task_id, "results": image_results}
 
-    # 1) FAST_PREVIEW 만큼만 즉시 디코드+추론
+    # 1) FAST_PREVIEW 장만 즉시 추론 (여기엔 '배치/비디오재료' 코드가 있으면 안 됨)
     for i, itm in enumerate(manifest):
         if i >= FAST_PREVIEW:
             image_results.append({"filename": itm["filename"], "detections": [], "avg_confidence": 0})
@@ -1055,39 +1053,39 @@ async def start_video_analysis(
         try:
             with open(itm["path"], "rb") as fp:
                 data = fp.read()
-            bgr = await loop.run_in_executor(EXECUTOR, safe_decode_and_resize, data, TARGET_W, TARGET_H)
-            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr)  # 단일도 OK
+            bgr  = await loop.run_in_executor(EXECUTOR, decode_and_cover, data, TARGET_W, TARGET_H)
+            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr, FINAL_IMGSZ, FINAL_CONF, 100)
             avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
             image_results.append({"filename": itm["filename"], "detections": dets, "avg_confidence": avg_conf})
         except Exception as e:
             image_results.append({"filename": itm["filename"], "detections": [], "avg_confidence": 0, "error": str(e)})
 
-    # 2) 초기 상태 저장 후 즉시 응답할 준비
+    # 2) 초기 상태 저장 후 즉시 응답 준비
     with SessionLocal() as db:
         set_task_db(db, task_id, status="PROCESSING", image_results=image_results)
 
-    # 3) 백그라운드에서 나머지 전부 디코드+배치 추론+점진 저장+최종 영상 생성
+    # 3) 나머지는 백그라운드에서 처리 (배치 추론 + 점진 저장 + 최종 비디오 생성)
     def bg_finish_and_render():
         try:
             name_to_result = {r["filename"]: r for r in image_results}
 
+            # 아직 결과가 비어있는 파일들
             pending = [m for m in manifest if not name_to_result.get(m["filename"], {}).get("detections")]
+
+            # --- 배치 루프 (여기가 '배치 디코드 구간') ---
             for i in range(0, len(pending), max(1, BATCH_SIZE)):
                 batch = pending[i:i + BATCH_SIZE]
 
-                # 디코드
                 batch_imgs, batch_names = [], []
                 for itm in batch:
                     with open(itm["path"], "rb") as fp:
                         data = fp.read()
-                    img = safe_decode_and_resize(data, TARGET_W, TARGET_H)
+                    img = decode_and_cover(data, TARGET_W, TARGET_H)
                     batch_imgs.append(img)
                     batch_names.append(itm["filename"])
 
-                # 한 번에 추론
                 det_lists = run_yolo_np_bgr(batch_imgs, imgsz=FINAL_IMGSZ, conf=FINAL_CONF, max_det=100)
 
-                # 결과 반영 + 점진 저장
                 for fname, dets in zip(batch_names, det_lists):
                     avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
                     name_to_result[fname] = {"filename": fname, "detections": dets, "avg_confidence": avg_conf}
@@ -1096,12 +1094,12 @@ async def start_video_analysis(
                     sorted_results = [name_to_result[m["filename"]] for m in manifest]
                     set_task_db(db, task_id, status="PROCESSING", image_results=sorted_results)
 
-            # 최종 비디오 재료 만들기
-            frames_with_dets: list[tuple[np.ndarray, list]] = []
+            # --- 최종 비디오 재료 만들기 (여기가 '최종 비디오 재료 만들기') ---
+            frames_with_dets: List[Tuple[np.ndarray, list]] = []
             for m in manifest:
                 with open(m["path"], "rb") as fp:
                     data = fp.read()
-                img = safe_decode_and_resize(data, TARGET_W, TARGET_H)
+                img  = decode_and_cover(data, TARGET_W, TARGET_H)
                 dets = name_to_result[m["filename"]]["detections"]
                 frames_with_dets.append((img, dets))
 
@@ -1113,7 +1111,7 @@ async def start_video_analysis(
 
     threading.Thread(target=bg_finish_and_render, daemon=True).start()
 
-    # 4) 프론트는 task_id로 폴링
+    # 4) 프론트는 task_id 폴링
     return {"task_id": task_id, "results": image_results}
 
 # 일일 박스 카운트 증가
@@ -1351,6 +1349,13 @@ def get_settings():
         "INFER_EVERY_N_FRAMES": _int("INFER_EVERY_N_FRAMES", 10),
         "SECONDS_PER_IMAGE": HOLD_SEC,   # ← 변수 사용
     }
+
+# CORS Preflight
+@app.options("/{rest_of_path:path}")
+def _any_preflight(rest_of_path: str):
+    # CORS 미들웨어가 헤더를 붙여줍니다.
+    return Response(status_code=200)
+
 # --- 최종 라우터 등록 ---
 app.include_router(auth_router,      prefix="/auth")
 app.include_router(analysis_router,  prefix="/analysis") 
