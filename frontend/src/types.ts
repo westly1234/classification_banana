@@ -36,5 +36,6 @@ export interface ImageAnalysisResultPayload {
     filename: string;
     detections: YoloAnalysisResult[];
     avg_confidence: number;
+    processed: boolean; // 분석 완료 여부
     error?: string; 
 }

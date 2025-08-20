@@ -665,12 +665,12 @@ def update_daily_analysis_stat(db: Session, target_date: date):
     db.commit() 
 
 # --- 📹 비동기 작업 및 동영상 생성 ---
-def decode_and_cover(img_bytes: bytes, dst_w: int = TARGET_W, dst_h: int = TARGET_H) -> np.ndarray:
+def decode_and_cover(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
     arr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("이미지 디코딩 실패")
-    return resize_cover(img, dst_w, dst_h)
+    return resize_cover(img, dst_w, dst_h) 
 
 HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.5)
 SCROLL_SLOW = float(os.getenv("SCROLL_SLOW", "1.6"))
@@ -767,92 +767,49 @@ def make_long_strip(frames_with_dets: List[Tuple[np.ndarray, list]], out_w: int,
 
     return np.hstack(tiles) if tiles else np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
-def write_video(
-    frames_with_dets: List[Tuple[np.ndarray, list]],
-    out_path: str,
-    fps: int = VIDEO_FPS,              # 예: 8
-    hold_sec: float = SECONDS_PER_IMAGE  # 이미지 1장 당 보여줄 시간(초)
-) -> None:
-    """
-    1) 모든 이미지를 (TARGET_W, TARGET_H)로 맞춘 타일로 만들고 라벨을 그린 뒤,
-    2) 가로로 이어붙여 long_img 생성,
-    3) long_img를 좌→우로 일정 속도로 스크롤하면서 비디오 생성.
-    """
-    if not frames_with_dets:
-        raise ValueError("frames_with_dets is empty")
+def write_video(frames_with_dets, out_path, fps=VIDEO_FPS, hold_sec=SECONDS_PER_IMAGE):
+    out_w, out_h = TARGET_W, TARGET_H
 
-    out_w = TARGET_W
-    out_h = TARGET_H
-
-    long_img = make_long_strip(frames_with_dets, out_w, out_h)
-    H, L = long_img.shape[0], long_img.shape[1]
-
-    start_dx = 0
-    end_dx   = max(0, L - out_w)
-
-    if L <= out_w:
-        # 이동 여지가 없으면 그냥 정지 비디오
-        scroll_frames = max(1, int(math.ceil(hold_sec * fps)))
-        frames = [long_img[:, 0:out_w]] * scroll_frames * len(frames_with_dets)
-    else:
-        # 전체 스크롤 프레임 수 = 이미지 수 * (hold_sec * fps)
-        total_frames = max(1, int(math.ceil(len(frames_with_dets) * hold_sec * fps * SCROLL_SLOW)))
-        frames = []
-        for i in range(total_frames):
-            t = i / (total_frames - 1) if total_frames > 1 else 0.0  # 0→1
-            dx = int(round(start_dx + t * (end_dx - start_dx))) 
-            crop = long_img[:, dx:dx + out_w]
-            if crop.shape[1] < out_w:
-                # 우측 끝에서 부족하면 패딩
-                pad = out_w - crop.shape[1]
-                crop = cv2.copyMakeBorder(crop, 0, 0, 0, pad, cv2.BORDER_CONSTANT, value=(0,0,0))
-            frames.append(crop)
-
-    # FFmpeg 파이프 우선
-    using_ffmpeg = False
-    proc = None
-    vw = None
+    # ffmpeg 파이프 준비 (없으면 OpenCV)
+    using_ffmpeg, proc, vw = False, None, None
     if shutil.which("ffmpeg"):
-        try:
-            cmd = [
-                "ffmpeg","-y","-loglevel","error",
-                "-f","rawvideo","-pix_fmt","bgr24",
-                "-s", f"{out_w}x{out_h}",
-                "-r", str(fps), "-i","-",
-                "-c:v","libx264","-preset","veryfast","-crf","23",
-                "-threads", "1" if CPU_CORES <= 2 else "2",
-                "-pix_fmt","yuv420p","-movflags","+faststart",
-                out_path
-            ]
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if proc.stdin is None:
-                raise RuntimeError("failed to open ffmpeg stdin")
-            using_ffmpeg = True
-        except Exception as e:
-            print(f"[write_video] ffmpeg open failed: {e}; fallback to OpenCV")
-
-    if not using_ffmpeg:
+        cmd = [
+            "ffmpeg","-y","-loglevel","error",
+            "-f","rawvideo","-pix_fmt","bgr24",
+            "-s", f"{out_w}x{out_h}","-r", str(fps), "-i","-",
+            "-c:v","libx264","-preset","veryfast","-crf","23",
+            "-threads","1" if CPU_CORES <= 2 else "2",
+            "-pix_fmt","yuv420p","-movflags","+faststart", out_path
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if proc.stdin is None:
+            raise RuntimeError("failed to open ffmpeg stdin")
+        using_ffmpeg = True
+    else:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         vw = cv2.VideoWriter(out_path, fourcc, fps, (out_w, out_h))
         if not vw.isOpened():
-            raise RuntimeError(f"OpenCV VideoWriter open failed ({out_w}x{out_h}@{fps})")
+            raise RuntimeError("VideoWriter open failed")
 
+    # ✅ 프레임을 만들자마자 바로 한 장씩 씁니다(리스트에 쌓지 않음)
     try:
-        for i, fr in enumerate(frames):
-            if using_ffmpeg:
-                proc.stdin.write(fr.tobytes())
-            else:
-                vw.write(fr)
-            if i % 10 == 0:
-                print(f"[write_video] frame {i+1}/{len(frames)}")
+        repeats = max(1, int(round(hold_sec * fps)))
+        for img_bgr, dets in frames_with_dets:
+            if img_bgr.shape[1] != out_w or img_bgr.shape[0] != out_h:
+                img_bgr = resize_cover(img_bgr, out_w, out_h)
+            canvas = img_bgr.copy()
+            draw_overlay(canvas, dets, out_w, out_h)
+            for _ in range(repeats):
+                if using_ffmpeg:
+                    proc.stdin.write(canvas.tobytes())
+                else:
+                    vw.write(canvas)
     finally:
         if using_ffmpeg:
             try: proc.stdin.close()
-            except Exception: pass
-            rc = proc.wait(timeout=30)
-            if rc != 0:
-                raise RuntimeError(f"ffmpeg exited with code {rc}")
+            except: pass
+            proc.wait(timeout=30)
         elif vw is not None:
             vw.release()
 
@@ -1049,7 +1006,7 @@ async def start_video_analysis(
     # 1) FAST_PREVIEW 장만 즉시 추론 (여기엔 '배치/비디오재료' 코드가 있으면 안 됨)
     for i, itm in enumerate(manifest):
         if i >= FAST_PREVIEW:
-            image_results.append({"filename": itm["filename"], "detections": [], "avg_confidence": 0})
+            image_results.append({"filename": itm["filename"], "detections": [], "avg_confidence": None, "processed": False,})
             continue
         try:
             with open(itm["path"], "rb") as fp:
@@ -1057,9 +1014,9 @@ async def start_video_analysis(
             bgr  = await loop.run_in_executor(EXECUTOR, decode_and_cover, data, TARGET_W, TARGET_H)
             dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr, FINAL_IMGSZ, FINAL_CONF, 100)
             avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
-            image_results.append({"filename": itm["filename"], "detections": dets, "avg_confidence": avg_conf})
+            image_results.append({"filename": itm["filename"], "detections": dets, "avg_confidence": avg_conf, "processed": True})
         except Exception as e:
-            image_results.append({"filename": itm["filename"], "detections": [], "avg_confidence": 0, "error": str(e)})
+            image_results.append({"filename": itm["filename"], "detections": [], "avg_confidence": 0, "processed": True, "error": str(e)})
 
     # 2) 초기 상태 저장 후 즉시 응답 준비
     with SessionLocal() as db:
@@ -1070,13 +1027,11 @@ async def start_video_analysis(
         try:
             name_to_result = {r["filename"]: r for r in image_results}
 
-            # 아직 결과가 비어있는 파일들
             pending = [m for m in manifest if not name_to_result.get(m["filename"], {}).get("detections")]
 
-            # --- 배치 루프 (여기가 '배치 디코드 구간') ---
+            # --- 배치 추론 (디코드 즉시, 보관 최소화) ---
             for i in range(0, len(pending), max(1, BATCH_SIZE)):
                 batch = pending[i:i + BATCH_SIZE]
-
                 batch_imgs, batch_names = [], []
                 for itm in batch:
                     with open(itm["path"], "rb") as fp:
@@ -1095,20 +1050,24 @@ async def start_video_analysis(
                     sorted_results = [name_to_result[m["filename"]] for m in manifest]
                     set_task_db(db, task_id, status="PROCESSING", image_results=sorted_results)
 
-            # --- 최종 비디오 재료 만들기 (여기가 '최종 비디오 재료 만들기') ---
-            frames_with_dets: List[Tuple[np.ndarray, list]] = []
+            # --- 최종 비디오 재료 (필요한 것만 보관) ---
+            frames_with_dets = []
             for m in manifest:
                 with open(m["path"], "rb") as fp:
                     data = fp.read()
-                img  = decode_and_cover(data, TARGET_W, TARGET_H)
+                img = decode_and_cover(data, TARGET_W, TARGET_H)
                 dets = name_to_result[m["filename"]]["detections"]
                 frames_with_dets.append((img, dets))
 
             create_analysis_video(current_user, task_id, frames_with_dets)
 
+        except MemoryError:
+            with SessionLocal() as db:
+                set_task_db(db, task_id, status="FAILURE", result="Out of memory (512MB 한도 초과)")
         except Exception as e:
             with SessionLocal() as db:
                 set_task_db(db, task_id, status="FAILURE", result=str(e))
+
 
     threading.Thread(target=bg_finish_and_render, daemon=True).start()
 

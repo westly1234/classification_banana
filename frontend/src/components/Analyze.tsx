@@ -79,7 +79,7 @@ function mergeServerImageResults(
     const dets = (m.detections ?? []).map(d => ({ ...d, label: d.ripeness }));
 
     // 진행 중에는 '검출 있음' 또는 '에러가 있으면' 완료로 처리
-    const finished = dets.length > 0 || Boolean(m.error);
+    const finished = m.processed === true || Boolean(m.error);
 
     return {
       ...s,
@@ -390,7 +390,7 @@ export default function Analyze() {
               setAnalysisStates(prev => mergeServerImageResults(prev, data.image_results, idsToAnalyze));
               
               // 진행률 문구 (검출됐거나 에러가 있는 이미지를 '완료'로 간주)
-              const done = data.image_results.filter((r: any) => (r?.detections?.length ?? 0) > 0 || r?.error).length;
+              const done = data.image_results.filter((r: any) =>  r?.processed === true|| r?.error).length;
               const total = statesToAnalyze.length;
               setTaskStatus(`분석 중... ${done}/${total}`);
             }
