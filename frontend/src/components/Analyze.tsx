@@ -697,8 +697,14 @@ export default function Analyze() {
             <p className="text-xs text-slate-500 mt-1">PNG, JPG, WEBP 지원</p>
             {serverSettings && (
               <p className="text-[11px] text-slate-400 mt-1">
-                서버 제한: {serverSettings.MAX_FILES === 0 ? '개수 무제한' : `최대 ${serverSettings.MAX_FILES}장`},
-                {serverSettings.MAX_BYTES === 0 ? ' 용량 무제한' : ` 파일당 ${Math.floor(serverSettings.MAX_BYTES/1024/1024)}MB`}
+                서버 제한:&nbsp;
+                {serverSettings.MAX_FILES === 0
+                  ? '개수 무제한'
+                  : `최대 ${serverSettings.MAX_FILES}장`}
+                ,&nbsp;
+                {serverSettings.MAX_BYTES === 0
+                  ? '용량 무제한'
+                  : `파일당 ${(serverSettings.MAX_BYTES / (1024*1024)).toFixed(1)} MB`}
               </p>
             )}
           </div>

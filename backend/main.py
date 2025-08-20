@@ -278,29 +278,37 @@ def _heavy_init():
         print("❌ DB init failed:", e)
 
     try:
-        # ONNX 우선 → 없으면 PyTorch .pt 로 폴백
         if USE_ONNX and MODEL_ONNX.exists():
             print(f"🔃 Loading ONNX: {MODEL_ONNX}")
-            m = YOLO(str(MODEL_ONNX))         # Ultralytics가 onnxruntime 사용
+            # 👇 ONNX는 task 명시 + .to() 금지
+            m = YOLO(str(MODEL_ONNX), task="detect")
+            is_pt = False
         else:
             print(f"🔃 Loading PyTorch: {MODEL_PATH}")
-            m = YOLO(MODEL_PATH)
+            m = YOLO(MODEL_PATH)  # pt
             try:
-                m.fuse()                      # Conv+BN fuse (CPU에서 도움)
+                m.fuse()  # CPU에서 약간 도움
             except Exception:
                 pass
+            m.to('cpu')           # 👈 PyTorch에서만 허용
+            is_pt = True
+
+        # 공통 override (OK)
         m.overrides.update({
-            "conf": FINAL_CONF, "imgsz": FINAL_IMGSZ, "max_det": MAX_DET,
-            "agnostic_nms": True, "workers": 0, "stream_buffer": False
+            "conf": FINAL_CONF,
+            "imgsz": FINAL_IMGSZ,
+            "max_det": MAX_DET,
+            "agnostic_nms": True,
+            "workers": 0,
+            "stream_buffer": False
         })
-        m.to('cpu')
+
         globals()["model"] = m
         MODEL_READY = True
-        print("✅ YOLO loaded:", "ONNX" if MODEL_ONNX.exists() and USE_ONNX else "PyTorch")
+        print("✅ YOLO loaded:", "PyTorch" if is_pt else "ONNX")
     except Exception as e:
         print("❌ YOLO load failed:", e)
 
-    # 스타트업 1회 통계 갱신(실패해도 앱 실행은 계속)
     try:
         db = SessionLocal()
         update_daily_analysis_stat(db, datetime.now(KST).date())
@@ -435,6 +443,7 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
         imgsz=(imgsz or imgs[0].shape[1]),
         conf=(conf or 0.1),
         max_det=(max_det or 100),
+        device='cpu',
         verbose=False
     )
 
