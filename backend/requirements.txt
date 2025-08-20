@@ -35,7 +35,8 @@ torchaudio==2.2.0+cpu
 
 # --- YOLO ---
 ultralytics==8.3.168
-
+onnxruntime==1.16.3
+opencv-python
 # --- 기타 ---
 Jinja2==3.1.4
 itsdangerous==2.2.0
