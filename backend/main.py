@@ -258,8 +258,58 @@ def get_task_db(db, task_id: str):
         "updated_at": row.updated_at,
     }
 
-# --- YOLO 로드 ---
+# --- 절대 경로 설정 ---
 BASE_DIR = Path(__file__).resolve().parent
+
+# CPU 코어 수
+CPU_CORES = max(1, os.cpu_count() or 1)
+
+# YOLO/OpenCV 스레드 수
+cv2.setNumThreads(1 if CPU_CORES <= 2 else 2)
+torch.set_num_threads(1 if CPU_CORES <= 2 else 2)
+
+# 추론용 스레드풀
+EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1 if CPU_CORES <= 2 else 2
+)
+
+# --- 고성능 옵션 ---
+USE_ONNX = os.getenv("USE_ONNX", "1") == "1"        # 기본: ONNX 사용(있으면)
+MODEL_ONNX = (BASE_DIR / "best.onnx")               # 없으면 PyTorch로 폴백
+
+# 배치 추론(파일 여러 장 한 번에). CPU 1~2코어면 2, 4코어면 4 권장
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "2"))
+
+# 프리프로세스 스레드(디코드/리사이즈). CPU 코어에 따라 1~2 권장
+PREPROC_THREADS = 1 if CPU_CORES <= 2 else 2
+
+# 해상도 일관화(모델/전처리/비디오 공통)
+MODEL_W = int(os.getenv("MODEL_W", "640"))
+MODEL_H = int(os.getenv("MODEL_H", "480"))
+TARGET_W = int(os.getenv("TARGET_W", str(MODEL_W)))  # 비디오/표시 해상도
+TARGET_H = int(os.getenv("TARGET_H", str(MODEL_H)))
+
+# 업로드 제한(환경변수로 크게 조정 가능)
+MAX_FILES = int(os.getenv("MAX_FILES", "20"))                 # 프론트는 제한 제거(아래 4번), 서버는 안전빵
+MAX_BYTES = int(os.getenv("MAX_BYTES", str(10*1024*1024)))    # 10MB/파일
+
+#  비디오 생성(멀티 이미지) 최적화 + 해상도 키우기
+INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
+VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
+SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
+
+# 감지 파라미터
+QUICK_IMGSZ = int(os.getenv("QUICK_IMGSZ", "512"))
+FINAL_IMGSZ = int(os.getenv("FINAL_IMGSZ", "640"))
+QUICK_CONF  = float(os.getenv("QUICK_CONF",  "0.25"))
+FINAL_CONF  = float(os.getenv("FINAL_CONF",  "0.10"))
+MAX_DET     = int(os.getenv("MAX_DET",      "3"))
+
+# 팬(스크롤) 느낌
+PAN_PX_PER_SEC = int(os.getenv("PAN_PX_PER_SEC", "120"))  # 초당 이동 픽셀
+HOLD_SEC_PER_IMG = float(os.getenv("HOLD_SEC_PER_IMG", "2.0"))  # 한 장당 최소 체류
+
+# --- YOLO 로드 ---
 MODEL_PATH = BASE_DIR / "best.pt"
 
 # 3-1) 전역 상태
@@ -296,7 +346,7 @@ def _heavy_init():
         # 공통 override (OK)
         m.overrides.update({
             "conf": FINAL_CONF,
-            "imgsz": FINAL_IMGSZ,
+            "imgsz": (MODEL_W, MODEL_H),
             "max_det": MAX_DET,
             "agnostic_nms": True,
             "workers": 0,
@@ -355,53 +405,6 @@ FRESHNESS_MAP = {
     "rotten": 0.0,
 }
 
-CPU_CORES = max(1, os.cpu_count() or 1)
-
-# YOLO/OpenCV 스레드 수
-cv2.setNumThreads(1 if CPU_CORES <= 2 else 2)
-torch.set_num_threads(1 if CPU_CORES <= 2 else 2)
-
-# 추론용 스레드풀
-EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1 if CPU_CORES <= 2 else 2
-)
-
-# --- 고성능 옵션 ---
-USE_ONNX = os.getenv("USE_ONNX", "1") == "1"        # 기본: ONNX 사용(있으면)
-MODEL_ONNX = (BASE_DIR / "best.onnx")               # 없으면 PyTorch로 폴백
-
-# 배치 추론(파일 여러 장 한 번에). CPU 1~2코어면 2, 4코어면 4 권장
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "2"))
-
-# 프리프로세스 스레드(디코드/리사이즈). CPU 코어에 따라 1~2 권장
-PREPROC_THREADS = 1 if CPU_CORES <= 2 else 2
-
-# 해상도 일관화(모델/전처리/비디오 공통)
-MODEL_W = int(os.getenv("MODEL_W", "640"))
-MODEL_H = int(os.getenv("MODEL_H", "480"))
-TARGET_W = int(os.getenv("TARGET_W", str(MODEL_W)))  # 비디오/표시 해상도
-TARGET_H = int(os.getenv("TARGET_H", str(MODEL_H)))
-
-# 업로드 제한(환경변수로 크게 조정 가능)
-MAX_FILES = int(os.getenv("MAX_FILES", "20"))                 # 프론트는 제한 제거(아래 4번), 서버는 안전빵
-MAX_BYTES = int(os.getenv("MAX_BYTES", str(10*1024*1024)))    # 10MB/파일
-
-#  비디오 생성(멀티 이미지) 최적화 + 해상도 키우기
-INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
-VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
-SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
-
-# 감지 파라미터
-QUICK_IMGSZ = int(os.getenv("QUICK_IMGSZ", "512"))
-FINAL_IMGSZ = int(os.getenv("FINAL_IMGSZ", "640"))
-QUICK_CONF  = float(os.getenv("QUICK_CONF",  "0.25"))
-FINAL_CONF  = float(os.getenv("FINAL_CONF",  "0.10"))
-MAX_DET     = int(os.getenv("MAX_DET",      "3"))
-
-# 팬(스크롤) 느낌
-PAN_PX_PER_SEC = int(os.getenv("PAN_PX_PER_SEC", "120"))  # 초당 이동 픽셀
-HOLD_SEC_PER_IMG = float(os.getenv("HOLD_SEC_PER_IMG", "2.0"))  # 한 장당 최소 체류
-
 # 한글 폰트 경로: 환경변수 우선, 없으면 프로젝트 상대 경로
 FONT_PATH = os.getenv(
     "FONT_PATH",
@@ -438,14 +441,12 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
     if not imgs:
         return [] if single_input else []
 
-    res_list = model(
-        imgs,
-        imgsz=(imgsz or imgs[0].shape[1]),
-        conf=(conf or 0.1),
-        max_det=(max_det or 100),
-        device='cpu',
-        verbose=False
-    )
+    if isinstance(imgsz, (list, tuple)) and len(imgsz) == 2:
+        sz = tuple(imgsz)
+    else:
+        sz = (MODEL_W, MODEL_H)
+    res_list = model(imgs, imgsz=sz, conf=(conf or 0.1),
+                     max_det=(max_det or 100), device='cpu', verbose=False)
 
     VALID = {"ripe","unripe","freshripe","freshunripe","overripe","rotten"}
     outputs = []
@@ -930,7 +931,7 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
 
         # run_yolo_np_bgr 이 단일 이미지 버전이면 그대로,
         # 배치(List[np.ndarray]) 버전이면 [img_bgr][0] 으로 꺼내세요.
-        detections = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, img_bgr)
+        detections = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, img_bgr, (MODEL_W, MODEL_H), FINAL_CONF, 100)
 
         avg_conf = round((sum(d["confidence"] for d in detections) / len(detections)) if detections else 0.0, 4)
         avg_fresh = round((sum(d["freshness"] for d in detections) / len(detections)) if detections else 0.0, 4)
@@ -1027,7 +1028,7 @@ async def start_video_analysis(
             with open(itm["path"], "rb") as fp:
                 data = fp.read()
             bgr  = await loop.run_in_executor(EXECUTOR, decode_and_cover, data, TARGET_W, TARGET_H)
-            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr, FINAL_IMGSZ, FINAL_CONF, 100)
+            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr, (MODEL_W, MODEL_H), FINAL_CONF, 100)
             avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
             image_results.append({"filename": itm["filename"], "detections": dets, "avg_confidence": avg_conf, "processed": True})
         except Exception as e:
@@ -1055,7 +1056,7 @@ async def start_video_analysis(
                     batch_imgs.append(img)
                     batch_names.append(itm["filename"])
 
-                det_lists = run_yolo_np_bgr(batch_imgs, imgsz=FINAL_IMGSZ, conf=FINAL_CONF, max_det=100)
+                det_lists = run_yolo_np_bgr(batch_imgs, imgsz=(MODEL_W, MODEL_H), conf=FINAL_CONF, max_det=100)
 
                 for fname, dets in zip(batch_names, det_lists):
                     avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
