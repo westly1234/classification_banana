@@ -383,7 +383,7 @@ export default function Analyze() {
         pollRef.current = window.setInterval(async () => {
           try {
             // 캐시 우회를 위해 ts 붙임
-            const { data } = await api.get(`/tasks/${task_id}/status`, { params: { ts: Date.now() } });
+            const { data } = await api.get(`/tasks/${task_id}/status`, { params: { ts: Date.now() }, timeout: 60000 });
 
             // 1) PROCESSING 동안에도 썸네일을 계속 채우기
             if (Array.isArray(data.image_results) && data.image_results.length > 0) {
@@ -427,7 +427,7 @@ export default function Analyze() {
             setTaskStatus('상태 확인 중 오류');
             console.error(pollError);
           }
-        }, 1000); // ⬅️ 1초 간격으로 폴링(더 빠르게)
+        }, 3000); // ⬅️ 3초 간격으로 폴링
       } catch (reqError: any) {
         const msg = reqError.response?.data?.detail ||   (reqError.code === 'ECONNABORTED' ? '요청 시간이 초과되었습니다. 잠시 후 다시 시도하세요.' :
           '서버가 바쁘거나 일시적으로 중단되었습니다. 잠시 후 다시 시도하세요.');

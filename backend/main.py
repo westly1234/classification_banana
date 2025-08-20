@@ -185,6 +185,7 @@ admin.add_view(AnalysisAdmin)
 # --- CORS 설정 ---
 FRONT_EXACT = [
     "https://classification-banana.onrender.com",
+    "https://classification-banana-backend.onrender.com",
     "https://classification-banana-2.onrender.com",
     "http://localhost:5173",
 ]
