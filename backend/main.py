@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import os, re, asyncio, concurrent.futures, base64, uuid, threading, math, json, time, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
+import os, asyncio, concurrent.futures, base64, uuid, threading, json, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -15,7 +15,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # FastAPI 및 관련 라이브러리
-from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File, Response
+from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.responses import FileResponse

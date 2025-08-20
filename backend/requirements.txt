@@ -1,7 +1,7 @@
 # --- use CPU wheels ---
 --extra-index-url https://download.pytorch.org/whl/cpu
 
-# --- FastAPI / 서버 ---
+# --- FastAPI / Server ---
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
 python-multipart==0.0.9
@@ -9,34 +9,32 @@ pydantic==2.7.1
 starlette==0.37.2
 aiofiles==23.2.1
 
-# --- 인증/보안 ---
+# --- Auth / Security ---
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-jose[cryptography]==3.3.0
 
-# --- DB/관리 ---
+# --- DB / Admin ---
 SQLAlchemy==2.0.30
 sqladmin==0.16.1
-psycopg2-binary==2.9.9 
+psycopg2-binary==2.9.9
 
-# --- 시간/유틸 ---
+# --- Time / Utils ---
 pytz==2024.1
 MarkupSafe==2.1.5
+itsdangerous==2.2.0
+Jinja2==3.1.4
 
-# --- 이미지/수치 ---
+# --- Numeric / Imaging ---
 numpy==1.26.4
 pillow==10.3.0
-opencv-python-headless==4.9.0.80
+opencv-python-headless==4.9.0.80   # ← 서버는 headless만 사용
 
-# --- 딥러닝 ---
+# --- Deep Learning (CPU) ---
 torch==2.2.0+cpu
 torchvision==0.17.0+cpu
-torchaudio==2.2.0+cpu
 
-# --- YOLO ---
+# --- YOLO / ONNX ---
 ultralytics==8.3.168
-onnxruntime==1.16.3
-opencv-python
-# --- 기타 ---
-Jinja2==3.1.4
-itsdangerous==2.2.0
+onnx==1.18.0                        # ← 이걸 명시해두면 자동설치/경고 사라짐
+onnxruntime==1.16.3                 # CPU 추론 엔진
