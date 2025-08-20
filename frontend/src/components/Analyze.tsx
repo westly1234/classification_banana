@@ -152,7 +152,7 @@ export default function Analyze() {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await api.get<ServerSettings>('/settings');
+        const { data } = await api.get<ServerSettings>('/settings/');
         setServerSettings(data);
       } catch { /* 무시 */ }
     })();

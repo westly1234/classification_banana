@@ -1338,6 +1338,7 @@ def get_summary_stats():
 def _int(name, default): return int(os.getenv(name, str(default)))
 def _float(name, default): return float(os.getenv(name, str(default)))
 
+@settings_router.get("")
 @settings_router.get("/")
 def get_settings():
     return {
@@ -1350,11 +1351,6 @@ def get_settings():
         "SECONDS_PER_IMAGE": HOLD_SEC,   # ← 변수 사용
     }
 
-# CORS Preflight
-@app.options("/{rest_of_path:path}")
-def _any_preflight(rest_of_path: str):
-    # CORS 미들웨어가 헤더를 붙여줍니다.
-    return Response(status_code=200)
 
 # --- 최종 라우터 등록 ---
 app.include_router(auth_router,      prefix="/auth")
