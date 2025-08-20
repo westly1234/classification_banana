@@ -289,6 +289,10 @@ def _heavy_init():
                 m.fuse()                      # Conv+BN fuse (CPU에서 도움)
             except Exception:
                 pass
+        m.overrides.update({
+            "conf": FINAL_CONF, "imgsz": FINAL_IMGSZ, "max_det": MAX_DET,
+            "agnostic_nms": True, "workers": 0, "stream_buffer": False
+        })
         m.to('cpu')
         globals()["model"] = m
         MODEL_READY = True
@@ -417,28 +421,12 @@ def letterbox_image(img, target_width, target_height):
     new_img[top:top+nh, left:left+nw] = resized
     return new_img
 
-def _clip01(v: float) -> float:
-    """
-    0.0 ~ 1.0 범위로 클리핑
-    """
-    return max(0.0, min(1.0, v))
-
 def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
-    """
-    imgs_bgr: np.ndarray (H,W,3) 또는 [np.ndarray, ...]
-    return: 단일 입력이면 [det,...], 배치면 [[det,...], [det,...], ...]
-    """
     if not model:
         raise HTTPException(status_code=503, detail="모델을 사용할 수 없습니다.")
 
-    # --- 단일/배치 정규화 ---
-    single_input = False
-    if isinstance(imgs_bgr, np.ndarray):
-        imgs = [imgs_bgr]
-        single_input = True
-    else:
-        imgs = list(imgs_bgr)
-
+    single_input = isinstance(imgs_bgr, np.ndarray)
+    imgs = [imgs_bgr] if single_input else list(imgs_bgr)
     if not imgs:
         return [] if single_input else []
 
@@ -461,16 +449,25 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
             if cls not in VALID:
                 continue
 
-            x1, y1, x2, y2 = box.xyxy[0]  # 좌표 추출
-            nx = _clip01(x1.item() / w)
-            ny = _clip01(y1.item() / h)
-            nw = _clip01((x2 - x1).item() / w)
-            nh = _clip01((y2 - y1).item() / h)
-            # 우측/하단 넘침 보정
-            if nx + nw > 1.0:
-                nw = round(1.0 - nx, 4)
-            if ny + nh > 1.0:
-                nh = round(1.0 - ny, 4)
+            # xyxy → 정규화(0~1). 음수/초과 값 보정
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            # 음수/초과 보정 (모델/리사이즈 경계 오차)
+            x1 = max(0.0, min(w - 1.0, x1))
+            y1 = max(0.0, min(h - 1.0, y1))
+            x2 = max(0.0, min(w - 1.0, x2))
+            y2 = max(0.0, min(h - 1.0, y2))
+            if x2 <= x1: x2 = min(w - 1.0, x1 + 1.0)
+            if y2 <= y1: y2 = min(h - 1.0, y1 + 1.0)
+
+            nx = x1 / w
+            ny = y1 / h
+            nw = (x2 - x1) / w
+            nh = (y2 - y1) / h
+
+            # 우/하단 미세 넘침 보정(부동소수점 안전 마진)
+            eps = 1e-4
+            if nx + nw > 1.0: nw = max(0.0, 1.0 - nx - eps)
+            if ny + nh > 1.0: nh = max(0.0, 1.0 - ny - eps)
 
             dets.append({
                 "ripeness": KOREAN_CLASSES.get(cls, cls),
@@ -678,37 +675,36 @@ SCROLL_SLOW = float(os.getenv("SCROLL_SLOW", "1.6"))
 # 오버레이(박스/라벨) 그리기
 # ---------------------------
 def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> None:
-    """
-    좌표는 0~1 정규화. 박스는 OpenCV, 라벨은 PIL+TTF(한글).
-    라벨은 박스 '위'에 우선 배치, 공간이 없으면 박스 '안쪽' 또는 '아래'로 이동.
-    """
     if not detections:
         return
 
-    # 1) 박스
+    # 1) 박스는 OpenCV로, 두께는 해상도 비례
+    thickness = max(2, min(6, (w + h) // 400))
     for d in detections:
-        bb = (d.get("boundingBox") or {})
-        x1 = int(bb.get("x", 0.0) * w)
-        y1 = int(bb.get("y", 0.0) * h)
-        x2 = int((bb.get("x", 0.0) + bb.get("width", 0.0)) * w)
-        y2 = int((bb.get("y", 0.0) + bb.get("height", 0.0)) * h)
+        bb = d.get("boundingBox") or {}
+        # 정규화 → 픽셀
+        x1 = int(round(bb.get("x", 0.0) * w))
+        y1 = int(round(bb.get("y", 0.0) * h))
+        x2 = int(round((bb.get("x", 0.0) + bb.get("width", 0.0)) * w))
+        y2 = int(round((bb.get("y", 0.0) + bb.get("height", 0.0)) * h))
 
-        x1 = max(0, min(w - 1, x1))
-        y1 = max(0, min(h - 1, y1))
-        x2 = max(x1 + 1, min(w, x2))
-        y2 = max(y1 + 1, min(h, y2))
+        # 화면 내로 강제 클램핑
+        x1 = max(0, min(w - 2, x1))
+        y1 = max(0, min(h - 2, y1))
+        x2 = max(x1 + 1, min(w - 1, x2))
+        y2 = max(y1 + 1, min(h - 1, y2))
 
-        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 3)
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), thickness)
 
-    # 2) 라벨 (PIL)
+    # 2) 라벨은 PIL로 (한글 폰트), 항상 화면 안에
     img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
     draw = ImageDraw.Draw(img)
     font = _get_font(22)
 
     for d in detections:
-        bb = (d.get("boundingBox") or {})
-        x1 = int(bb.get("x", 0.0) * w)
-        y1 = int(bb.get("y", 0.0) * h)
+        bb = d.get("boundingBox") or {}
+        x1 = int(round(bb.get("x", 0.0) * w))
+        y1 = int(round(bb.get("y", 0.0) * h))
 
         ripeness = d.get("ripeness", "")
         conf_pct = float(d.get("confidence", 0.0)) * 100.0
@@ -719,18 +715,18 @@ def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> Non
         pad = 6
         box_w, box_h = tw + pad * 2, th + pad * 2
 
+        # X는 항상 프레임 안
         x = max(0, min(w - box_w, x1))
 
-        # ① 위에 놓을 공간이 있으면 위로
+        # Y 우선순위: 박스 위 → 박스 안 → 프레임 아래쪽
         if y1 - box_h - 2 >= 0:
             y_top = y1 - box_h - 2
-        # ② 박스 내부에 들어가면 내부(가독성 좋음)
         elif y1 + 2 + box_h <= h:
             y_top = y1 + 2
-        # ③ 그래도 안 되면 맨 아래에 붙이기
         else:
             y_top = max(0, h - box_h)
 
+        # 라벨 BG + 텍스트
         bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
         img.paste(bg, (x, y_top), bg)
         draw.text((x + pad, y_top + pad), label, font=font, fill=(255, 255, 255, 255))
@@ -779,6 +775,8 @@ def write_video(frames_with_dets, out_path, fps=VIDEO_FPS, hold_sec=SECONDS_PER_
             "-s", f"{out_w}x{out_h}","-r", str(fps), "-i","-",
             "-c:v","libx264","-preset","veryfast","-crf","23",
             "-threads","1" if CPU_CORES <= 2 else "2",
+            "-max_muxing_queue_size","64",     # 🔻 내부 큐 크기 축소
+            "-bufsize","2M",                   # 🔻 파이프 버퍼 힌트 감소
             "-pix_fmt","yuv420p","-movflags","+faststart", out_path
         ]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
@@ -928,13 +926,21 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
         avg_conf = round((sum(d["confidence"] for d in detections) / len(detections)) if detections else 0.0, 4)
         avg_fresh = round((sum(d["freshness"] for d in detections) / len(detections)) if detections else 0.0, 4)
 
+        h, w = img_bgr.shape[:2]
+        new_w = 512
+        new_h = max(1, int(h * (new_w / max(1, w))))
+        thumb_bgr = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        thumb = cv2.imencode(".jpg", thumb_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])[1].tobytes()
+
         db = SessionLocal()
         try:
             db.add(Analysis(
                 username=current_user.nickname,
                 ripeness=detections[0]["ripeness"] if detections else "분석불가",
-                confidence=avg_conf, freshness=avg_fresh,
-                image_blob=img_bytes, created_at=datetime.now(KST)
+                confidence=avg_conf,
+                freshness=avg_fresh,
+                image_blob=thumb,                         # <<< 여기!
+                created_at=datetime.now(KST)
             ))
             increment_daily_box_counts(db, detections)
             db.commit()
@@ -1049,6 +1055,8 @@ async def start_video_analysis(
                 with SessionLocal() as db:
                     sorted_results = [name_to_result[m["filename"]] for m in manifest]
                     set_task_db(db, task_id, status="PROCESSING", image_results=sorted_results)
+                del batch_imgs, det_lists
+                import gc; gc.collect()
 
             # --- 최종 비디오 재료 (필요한 것만 보관) ---
             frames_with_dets = []
