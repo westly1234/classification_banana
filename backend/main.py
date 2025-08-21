@@ -185,24 +185,24 @@ admin.add_view(AnalysisAdmin)
 # --- CORS 설정 ---
 FRONT_EXACT = [
     "https://classification-banana-frontend.onrender.com",
-    "https://classification-banana.onrender.com",
     "https://classification-banana-backend.onrender.com",
+    "https://classification-banana.onrender.com",
     "https://classification-banana-2.onrender.com",
     "http://localhost:5173",
 ]
-FRONT_REGEX = r"https://classification-banana(?:-\d+)?\.onrender\.com)$"
+
+FRONT_REGEX = r"^https://classification-banana(?:-\d+)?\.onrender\.com$"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONT_EXACT,            # 정확 매칭 우선
-    allow_origin_regex=FRONT_REGEX,       # 1,2,... 번호가 바뀌어도 허용
-    allow_credentials=False,          # 쿠키 안 쓰니 굳이 True 필요 없음
-    allow_methods=["*"],              # 전체 허용
-    allow_headers=["*"],              # 전체 허용 (프리플라이트 헤더 불일치 방지)
+    allow_origins=FRONT_EXACT,
+    allow_origin_regex=FRONT_REGEX,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
     expose_headers=["Content-Type", "Cache-Control", "Content-Disposition"],
-    max_age=86400,                        # 프리플라이트 24h 캐시
+    max_age=86400,
 )
-
 
 # ✅ 세션 쿠키 보안 옵션 (SQLAdmin용)
 https_only = os.getenv("ENV", "prod") == "prod"
