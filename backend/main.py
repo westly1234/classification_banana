@@ -191,12 +191,9 @@ FRONT_EXACT = [
     "http://localhost:5173",
 ]
 
-FRONT_REGEX = r"^https://classification-banana(?:-\d+)?\.onrender\.com$"
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONT_EXACT,
-    allow_origin_regex=FRONT_REGEX,
+    allow_origins=FRONT_EXACT,   # ← 정규식 사용 안 함
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
