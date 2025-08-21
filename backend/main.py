@@ -189,7 +189,7 @@ FRONT_EXACT = [
     "https://classification-banana-2.onrender.com",
     "http://localhost:5173",
 ]
-FRONT_REGEX = r"^https://classification-banana(?:-\d+)?\.onrender\.com$"
+FRONT_REGEX = r"^(https://[a-z0-9-]+\.hf\.space|https://classification-banana(?:-\d+)?\.onrender\.com)$"
 
 app.add_middleware(
     CORSMiddleware,
@@ -346,7 +346,7 @@ def _heavy_init():
         # 공통 override (OK)
         m.overrides.update({
             "conf": FINAL_CONF,
-            "imgsz": (MODEL_W, MODEL_H),
+            "imgsz": (MODEL_W, MODEL_H,), # (H, W) 순서 주의
             "max_det": MAX_DET,
             "agnostic_nms": True,
             "workers": 0,
@@ -444,7 +444,7 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
     if isinstance(imgsz, (list, tuple)) and len(imgsz) == 2:
         sz = tuple(imgsz)
     else:
-        sz = (MODEL_W, MODEL_H)
+        sz = (MODEL_W, MODEL_H,)
     res_list = model(imgs, imgsz=sz, conf=(conf or 0.1),
                      max_det=(max_det or 100), device='cpu', verbose=False)
 
@@ -931,7 +931,7 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
 
         # run_yolo_np_bgr 이 단일 이미지 버전이면 그대로,
         # 배치(List[np.ndarray]) 버전이면 [img_bgr][0] 으로 꺼내세요.
-        detections = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, img_bgr, (MODEL_W, MODEL_H), FINAL_CONF, 100)
+        detections = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, img_bgr, (MODEL_W, MODEL_H,), FINAL_CONF, 100)
 
         avg_conf = round((sum(d["confidence"] for d in detections) / len(detections)) if detections else 0.0, 4)
         avg_fresh = round((sum(d["freshness"] for d in detections) / len(detections)) if detections else 0.0, 4)
@@ -1028,7 +1028,7 @@ async def start_video_analysis(
             with open(itm["path"], "rb") as fp:
                 data = fp.read()
             bgr  = await loop.run_in_executor(EXECUTOR, decode_and_cover, data, TARGET_W, TARGET_H)
-            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr, (MODEL_W, MODEL_H), FINAL_CONF, 100)
+            dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr, (MODEL_W, MODEL_H,), FINAL_CONF, 100)
             avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
             image_results.append({"filename": itm["filename"], "detections": dets, "avg_confidence": avg_conf, "processed": True})
         except Exception as e:
@@ -1056,7 +1056,7 @@ async def start_video_analysis(
                     batch_imgs.append(img)
                     batch_names.append(itm["filename"])
 
-                det_lists = run_yolo_np_bgr(batch_imgs, imgsz=(MODEL_W, MODEL_H), conf=FINAL_CONF, max_det=100)
+                det_lists = run_yolo_np_bgr(batch_imgs, imgsz=(MODEL_W, MODEL_H,), conf=FINAL_CONF, max_det=100)
 
                 for fname, dets in zip(batch_names, det_lists):
                     avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
