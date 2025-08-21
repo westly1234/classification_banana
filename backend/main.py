@@ -184,12 +184,13 @@ admin.add_view(AnalysisAdmin)
 
 # --- CORS 설정 ---
 FRONT_EXACT = [
+    "https://classification-banana-frontend.onrender.com",
     "https://classification-banana.onrender.com",
     "https://classification-banana-backend.onrender.com",
     "https://classification-banana-2.onrender.com",
     "http://localhost:5173",
 ]
-FRONT_REGEX = r"^(https://[a-z0-9-]+\.hf\.space|https://classification-banana(?:-\d+)?\.onrender\.com)$"
+FRONT_REGEX = r"https://classification-banana(?:-\d+)?\.onrender\.com)$"
 
 app.add_middleware(
     CORSMiddleware,

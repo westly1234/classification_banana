@@ -1,32 +1,22 @@
-# VCS / OS
+# Git
 .git
 .gitignore
-.DS_Store
 
-# Python
-venv
+# venv / caches
+venv/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.pytest_cache
-.mypy_cache
 
-# Node / Front
-node_modules/
-frontend/
-
-# 런타임 산출물/큰 파일
+# local/runtime artifacts
 results/
+tasks/
 *.mp4
-*.jpg
-*.jpeg
-*.png
-*.webp
-*.npy
-*.pt
-!best.pt
+*.webm
+*.avi
+*.db
+*.sqlite
+*.exe
 
-# 빌드 산출물
-dist/
-build/
+# node (혹시 포함되어 있다면)
+frontend/node_modules
+dist
