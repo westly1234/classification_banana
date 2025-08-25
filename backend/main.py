@@ -299,6 +299,49 @@ try:
 except Exception:
     FFMPEG_BIN = shutil.which("ffmpeg")  # 시스템 ffmpeg가 있으면 그거 사용
 
+# 한글 클래스 매핑
+KOREAN_CLASSES = {
+    "freshripe": "신선한 완숙",
+    "freshunripe": "신선한 미숙",
+    "overripe": "과숙",
+    "ripe": "완숙",
+    "rotten": "썩음",
+    "unripe": "미숙"
+}
+
+LABEL_SCORE = {
+    "미숙": 20,
+    "신선한 미숙": 40,
+    "완숙": 60,
+    "신선한 완숙": 80,
+    "과숙": 60,
+    "썩음": 20
+}
+
+FRESHNESS_MAP = {
+    "freshripe": 1.0,
+    "freshunripe": 0.9,
+    "ripe": 0.8,
+    "unripe": 0.6,
+    "overripe": 0.3,
+    "rotten": 0.0,
+}
+
+# 한글 폰트 경로: 환경변수 우선, 없으면 프로젝트 상대 경로
+FONT_PATH = os.getenv(
+    "FONT_PATH",
+    str((Path(__file__).parent / "fonts" / "NanumGothic.ttf").resolve())
+)
+_font_cache = {}
+
+def _get_font(size: int = 24):
+    if size not in _font_cache:
+        try:
+            _font_cache[size] = ImageFont.truetype(FONT_PATH, size=size)
+        except Exception:
+            _font_cache[size] = ImageFont.load_default()  # (한글 미지원일 수 있음)
+    return _font_cache[size]
+
 # --- YOLO 로드 ---
 MODEL_PATH = BASE_DIR / "best.pt"
 
@@ -373,6 +416,15 @@ def _heavy_init():
     try:
         print(f"🔃 Loading PyTorch (CPU): {MODEL_PATH}")
         m = YOLO(MODEL_PATH)  # .pt
+
+        try:
+            nm = getattr(m, "names", {})
+            if isinstance(nm, dict):
+                m.names = {i: KOREAN_CLASSES.get(v, v) for i, v in nm.items()}
+            elif isinstance(nm, (list, tuple)):
+                m.names = [KOREAN_CLASSES.get(v, v) for v in nm]
+        except Exception as e:
+            print("names localization skip:", e)
 
         # 약간의 CPU 최적화
         try:
@@ -454,48 +506,6 @@ class _SkipNoise(logging.Filter):
         return True
 
 logger.addFilter(_SkipNoise())
-
-KOREAN_CLASSES = {
-    "freshripe": "신선한 완숙",
-    "freshunripe": "신선한 미숙",
-    "overripe": "과숙",
-    "ripe": "완숙",
-    "rotten": "썩음",
-    "unripe": "미숙"
-}
-
-LABEL_SCORE = {
-    "미숙": 20,
-    "신선한 미숙": 40,
-    "완숙": 60,
-    "신선한 완숙": 80,
-    "과숙": 60,
-    "썩음": 20
-}
-
-FRESHNESS_MAP = {
-    "freshripe": 1.0,
-    "freshunripe": 0.9,
-    "ripe": 0.8,
-    "unripe": 0.6,
-    "overripe": 0.3,
-    "rotten": 0.0,
-}
-
-# 한글 폰트 경로: 환경변수 우선, 없으면 프로젝트 상대 경로
-FONT_PATH = os.getenv(
-    "FONT_PATH",
-    str((Path(__file__).parent / "fonts" / "NanumGothic.ttf").resolve())
-)
-_font_cache = {}
-
-def _get_font(size: int = 24):
-    if size not in _font_cache:
-        try:
-            _font_cache[size] = ImageFont.truetype(FONT_PATH, size=size)
-        except Exception:
-            _font_cache[size] = ImageFont.load_default()  # (한글 미지원일 수 있음)
-    return _font_cache[size]
 
 # --- YOLO 분석 함수 (여러 객체 지원) ---
 def letterbox_image(img, target_width, target_height):
