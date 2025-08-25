@@ -270,25 +270,23 @@ EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1 if CPU_CORES <= 2 else 2
 )
 
-# 배치 추론(파일 여러 장 한 번에). CPU 1~2코어면 2, 4코어면 4 권장
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "2"))
+# 배치 추론(파일 여러 장 한 번에).
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))
 
 # 프리프로세스 스레드(디코드/리사이즈). CPU 코어에 따라 1~2 권장
 PREPROC_THREADS = 1 if CPU_CORES <= 2 else 2
 
 # 해상도 일관화(모델/전처리/비디오 공통)
-MODEL_W = int(os.getenv("MODEL_W", "640"))
-MODEL_H = int(os.getenv("MODEL_H", "480"))
+MODEL_W = int(os.getenv("MODEL_W", "512"))
+MODEL_H = int(os.getenv("MODEL_H", "384"))
 TARGET_W = int(os.getenv("TARGET_W", str(MODEL_W)))  # 비디오/표시 해상도
 TARGET_H = int(os.getenv("TARGET_H", str(MODEL_H)))
 
 # 업로드 제한(환경변수로 크게 조정 가능)
-MAX_FILES = int(os.getenv("MAX_FILES", "15"))                 # 프론트는 제한 제거(아래 4번), 서버는 안전빵
-MAX_BYTES = int(os.getenv("MAX_BYTES", str(8*1024*1024)))    # 10MB/파일
+MAX_FILES = int(os.getenv("MAX_FILES", "8"))                 # 프론트는 제한 제거(아래 4번), 서버는 안전빵
+MAX_BYTES = int(os.getenv("MAX_BYTES", str(4*1024*1024)))    # 10MB/파일
 
-#  비디오 생성(멀티 이미지) 최적화 + 해상도 키우기
-INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
-VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
+# ffmpeg 사용 여부
 USE_FFMPEG = os.getenv("USE_FFMPEG", "1") == "1"
 
 # 감지 파라미터
@@ -975,8 +973,8 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
         del left
         import gc; gc.collect()
 
-FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "2"))               # ← 기본 2로
-VIDEO_INFER_SIZE = int(os.getenv("VIDEO_INFER_SIZE", "640"))     # ← 512~640 권장
+FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "4"))               
+VIDEO_INFER_SIZE = int(os.getenv("VIDEO_INFER_SIZE", "512"))
 
 def detect_video_and_write(input_path: str, output_path: str) -> None:
     cap = cv2.VideoCapture(input_path)
@@ -1177,7 +1175,7 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
         raise HTTPException(status_code=500, detail=f"이미지 분석 중 오류: {e}")
 
 # 앞의 N장만 즉시 추론
-FAST_PREVIEW = 2
+FAST_PREVIEW = int(os.getenv("FAST_PREVIEW", "1"))
 
 @analysis_router.post("/analyze_video")
 async def start_video_analysis(
@@ -1526,18 +1524,15 @@ def get_summary_stats():
 
 # 서버 제한값을 환경변수화 + 프론트에 자동 전파
 
-def _int(name, default): return int(os.getenv(name, str(default)))
-
 @settings_router.get("")
 @settings_router.get("/")
 def get_settings():
     return {
-        "MODEL_W": _int("MODEL_W", 640),
-        "MODEL_H": _int("MODEL_H", 480),
-        "MAX_FILES": _int("MAX_FILES", 15),
-        "MAX_BYTES": _int("MAX_BYTES", 8*1024*1024),
-        "VIDEO_FPS": VIDEO_FPS,          # ← 변수 사용
-        "INFER_EVERY_N_FRAMES": _int("INFER_EVERY_N_FRAMES", 10),
+        "MODEL_W": MODEL_W,
+        "MODEL_H": MODEL_H,
+        "MAX_FILES": MAX_FILES,
+        "MAX_BYTES": MAX_BYTES,
+        "FAST_PREVIEW": FAST_PREVIEW,
         "FRAME_STRIDE": FRAME_STRIDE,
     }
 
