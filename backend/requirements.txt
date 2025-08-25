@@ -36,5 +36,3 @@ torchvision==0.17.0+cpu
 
 # --- YOLO / ONNX ---
 ultralytics==8.3.168
-onnx==1.18.0                        # ← 이걸 명시해두면 자동설치/경고 사라짐
-onnxruntime==1.18.0                # CPU 추론 엔진

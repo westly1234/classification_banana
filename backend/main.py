@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 # 인증 관련 라이브러리
 from jose import jwt, JWTError
@@ -886,6 +886,295 @@ def create_analysis_video(
             db.close()
         print(f"[{task_id}] ❌ 비디오 생성 실패:", repr(e))
 
+
+# ▼ Environment knobs
+SCROLL_MODE = os.getenv("SCROLL_MODE", "1") == "1" # enable new scroll pipeline
+SCROLL_FPS = int(os.getenv("SCROLL_FPS", str(VIDEO_FPS))) # default = existing VIDEO_FPS
+SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.2")) # time a single tile stays on screen while panning
+DETECT_EVERY_FRAME = os.getenv("DETECT_EVERY_FRAME", "0") == "1" # turn on if you want frame-by-frame YOLO (slower)
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Helpers for the scroll video pipeline
+# ────────────────────────────────────────────────────────────────────────────────
+
+def _tile_images_cover(img_paths: List[str], out_w: int, out_h: int) -> List[np.ndarray]:
+    """Load & cover-resize each image to (out_w,out_h)."""
+    tiles = []
+    for p in img_paths:
+        with open(p, "rb") as fp:
+            data = fp.read()
+        img = decode_and_cover(data, out_w, out_h)
+        tiles.append(img)
+    return tiles
+
+
+def _detect_tiles(tiles: List[np.ndarray]) -> List[list]:
+    """Run YOLO once per tile (batch) and return per-tile detections."""
+    if not tiles:
+        return []
+    det_lists = run_yolo_np_bgr(tiles, imgsz=(MODEL_W, MODEL_H,), conf=FINAL_CONF, max_det=100)
+    # run_yolo_np_bgr returns a list when input is a list; ensure type
+    return det_lists if isinstance(det_lists, list) else [det_lists]
+
+
+def _hstack_no_padding(tiles: List[np.ndarray], out_h: int) -> np.ndarray:
+    """Horizontal concat with no padding. All tiles must be same H and W."""
+    if not tiles:
+        return np.zeros((out_h, TARGET_W, 3), dtype=np.uint8)
+    # ensure exact (TARGET_W, TARGET_H)
+    fixed = [t if (t.shape[0] == out_h and t.shape[1] == TARGET_W) else resize_cover(t, TARGET_W, out_h) for t in tiles]
+    return np.hstack(fixed)
+
+
+def _project_tile_dets_to_long_px(per_tile_dets: List[list], tile_w: int, tile_h: int) -> List[dict]:
+    """Map each tile's normalized boxes to absolute pixel coords in the long banner."""
+    long_boxes = []
+    for i, dets in enumerate(per_tile_dets):
+        x_off = i * tile_w
+        for d in dets or []:
+            bb = d.get("boundingBox", {})
+            # normalized in [0,1] → pixel in tile
+            x1 = int(round(bb.get("x", 0.0) * tile_w))
+            y1 = int(round(bb.get("y", 0.0) * tile_h))
+            x2 = int(round((bb.get("x", 0.0) + bb.get("width", 0.0)) * tile_w))
+            y2 = int(round((bb.get("y", 0.0) + bb.get("height", 0.0)) * tile_h))
+            # shift to long image coords
+            long_boxes.append({
+                "x1": x1 + x_off,
+                "y1": y1,
+                "x2": max(x1 + 1, x2) + x_off,
+                "y2": max(y1 + 1, y2),
+                "ripeness": d.get("ripeness", ""),
+                "confidence": float(d.get("confidence", 0.0)),
+            })
+    return long_boxes
+
+def _draw_overlay_px(frame_bgr: np.ndarray, boxes_px: List[dict]) -> None:
+    """Draw boxes/labels given in *frame* pixel coordinates (already clipped)."""
+    if not boxes_px:
+        return
+
+    h, w = frame_bgr.shape[:2]
+    thickness = max(2, min(6, (w + h) // 400))
+
+    # 1) Rectangles via OpenCV
+    for b in boxes_px:
+        cv2.rectangle(frame_bgr, (b["x1"], b["y1"]), (b["x2"], b["y2"]), (0, 255, 255), thickness)
+
+    # 2) Labels via PIL (Korean font-safe)
+    img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    draw = ImageDraw.Draw(img)
+    font = _get_font(22)
+
+
+    for b in boxes_px:
+        label = f"{b.get('ripeness','')} {b.get('confidence',0.0)*100:.1f}%"
+        l, t, r, btm = draw.textbbox((0, 0), label, font=font)
+        tw, th = (r - l), (btm - t)
+        pad = 6
+        box_w, box_h = tw + pad * 2, th + pad * 2
+        x = max(0, min(w - box_w, b["x1"]))
+        # prefer above box if room else below else bottom align
+        if b["y1"] - box_h - 2 >= 0:
+            y = b["y1"] - box_h - 2
+        elif b["y2"] + 2 + box_h <= h:
+            y = b["y2"] + 2
+        else:
+            y = max(0, h - box_h)
+        bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
+        img.paste(bg, (x, y), bg)
+        draw.text((x + pad, y + pad), label, font=font, fill=(255, 255, 255, 255))
+
+
+    frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+
+def _visible_boxes_in_window(long_boxes: List[dict], dx: int, view_w: int, view_h: int) -> List[dict]:
+    """Clip absolute long-image boxes to the current [dx, dx+view_w) view window."""
+    visible = []
+    x0, x1 = dx, dx + view_w
+    for b in long_boxes:
+        if b["x2"] <= x0 or b["x1"] >= x1:
+            continue # no horizontal overlap
+        # clip to view window
+        vx1 = max(0, b["x1"] - dx)
+        vx2 = min(view_w - 1, b["x2"] - dx)
+        vy1 = max(0, min(view_h - 2, b["y1"]))
+        vy2 = max(vy1 + 1, min(view_h - 1, b["y2"]))
+        if vx2 <= vx1:
+            continue
+        vb = {"x1": vx1, "y1": vy1, "x2": vx2, "y2": vy2,
+                "ripeness": b.get("ripeness",""), "confidence": b.get("confidence",0.0)}
+        visible.append(vb)
+    return visible
+
+def _write_scroll_video(long_img: np.ndarray,
+                        long_boxes_px: List[dict],
+                        out_path: str,
+                        fps: int,
+                        detect_every_frame: bool = False) -> None:
+    """Window-scan across long_img to produce scrolling video."""
+    view_w, view_h = TARGET_W, TARGET_H
+    H, W = long_img.shape[:2]
+    if W <= view_w:
+        # Not enough width to scroll → fall back to single-frame hold
+        return write_video([(long_img[:, :view_w].copy(), [])], out_path, fps=fps, hold_sec=max(1.0, SECONDS_PER_TILE))
+
+
+    total_tiles = max(1, W // view_w)
+    duration_sec = max(1.0, SECONDS_PER_TILE * total_tiles)
+    total_frames = max(2, int(round(duration_sec * fps)))
+
+
+    step = (W - view_w) / (total_frames - 1) # float step; cover whole span exactly once
+
+
+    # choose ffmpeg if available
+    using_ffmpeg, proc, vw = False, None, None
+    if shutil.which("ffmpeg"):
+        cmd = [
+            "ffmpeg","-y","-loglevel","error",
+            "-f","rawvideo","-pix_fmt","bgr24",
+            "-s", f"{view_w}x{view_h}","-r", str(fps), "-i","-",
+            "-c:v","libx264","-preset","veryfast","-crf","23",
+            "-threads","1" if CPU_CORES <= 2 else "2",
+            "-max_muxing_queue_size","64","-bufsize","2M",
+            "-pix_fmt","yuv420p","-movflags","+faststart", out_path
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if proc.stdin is None:
+            raise RuntimeError("failed to open ffmpeg stdin")
+        using_ffmpeg = True
+    else:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        vw = cv2.VideoWriter(out_path, fourcc, fps, (view_w, view_h))
+    if not vw.isOpened():
+        raise RuntimeError("VideoWriter open failed")
+
+
+    try:
+        for i in range(total_frames):
+            dx = int(round(i * step))
+            frame = long_img[:, dx:dx + view_w]
+            if frame.shape[1] != view_w:
+                # right edge safety padding (should rarely happen due to rounding)
+                pad = view_w - frame.shape[1]
+                frame = cv2.copyMakeBorder(frame, 0, 0, 0, pad, cv2.BORDER_CONSTANT, value=0)
+
+
+            canvas = frame.copy()
+
+
+            if detect_every_frame:
+                # run YOLO on the current view window
+                dets = run_yolo_np_bgr(canvas, imgsz=(MODEL_W, MODEL_H,), conf=FINAL_CONF, max_det=100)
+                dets = dets if isinstance(dets, list) else [dets]
+                det = dets[0] if dets else []
+                draw_overlay(canvas, det, view_w, view_h)
+            else:
+                vis = _visible_boxes_in_window(long_boxes_px, dx, view_w, view_h)
+                _draw_overlay_px(canvas, vis)
+
+
+            if using_ffmpeg:
+                proc.stdin.write(canvas.tobytes())
+            else:
+                vw.write(canvas)
+    finally:
+        if using_ffmpeg:
+            try: proc.stdin.close()
+            except: pass
+            proc.wait(timeout=30)
+        elif vw is not None:
+            vw.release()
+
+
+def create_scroll_analysis_video(current_user, task_id: str, manifest: List[Dict[str, str]], # [{filename, path}, ...]
+                                  name_to_result: Dict[str, dict], # filename → {detections, avg_confidence, ...}
+                                  ) -> None:
+    view_w, view_h = TARGET_W, TARGET_H
+    final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
+
+
+    # 1) Build tiles and long image
+    img_paths = [m["path"] for m in manifest]
+    tiles = _tile_images_cover(img_paths, view_w, view_h)
+
+
+    # If we don't yet have dets for all tiles, compute them now (batch)
+    missing = []
+    for m in manifest:
+        r = name_to_result.get(m["filename"]) or {}
+        if not r.get("detections"):
+            missing.append(m)
+    if missing:
+        need_paths = [m["path"] for m in missing]
+        need_tiles = _tile_images_cover(need_paths, view_w, view_h)
+        det_lists = _detect_tiles(need_tiles)
+        for m, dets in zip(missing, det_lists):
+            avg_conf = round(sum(d.get("confidence", 0.0) for d in dets) / len(dets), 4) if dets else 0.0
+            name_to_result[m["filename"]] = {"filename": m["filename"], "detections": dets, "avg_confidence": avg_conf}
+
+
+    per_tile_dets = [ (name_to_result[m["filename"]]["detections"]) for m in manifest ]
+    long_img = _hstack_no_padding(tiles, view_h)
+
+
+    # 2) Prepare long-image absolute boxes (for fast overlay)
+    long_boxes_px = _project_tile_dets_to_long_px(per_tile_dets, view_w, view_h)
+
+
+    # 3) Stream out scrolling video
+    _write_scroll_video(long_img, long_boxes_px, str(final_video_path), fps=SCROLL_FPS, detect_every_frame=DETECT_EVERY_FRAME)
+
+
+    if not final_video_path.exists() or final_video_path.stat().st_size == 0:
+        raise IOError("최종 MP4 파일이 비어 있음")
+
+
+    # 4) Aggregate stats & DB updates
+    all_dets = [d for dets in per_tile_dets for d in (dets or [])]
+    avg_conf = round(sum(d.get("confidence", 0.0) for d in all_dets) / len(all_dets), 3) if all_dets else 0.0
+    labels = [d.get("ripeness", "분석불가") for d in all_dets]
+    final_ripeness = Counter(labels).most_common(1)[0][0] if labels else "분석불가"
+    freshness = LABEL_SCORE.get(final_ripeness, 0.0)
+
+
+    # daily counters (best-effort)
+    try:
+        # fabricate a lightweight frames_with_dets to reuse your existing bulk counter
+        pseudo = [ (None, dets or []) for dets in per_tile_dets ]
+        db2 = SessionLocal(); increment_daily_box_counts_bulk(db2, pseudo); db2.close()
+    except Exception as e:
+        print("[warn] increment_daily_box_counts_bulk (scroll) failed:", e)
+
+
+    # save analysis row
+    db = SessionLocal()
+    try:
+        username = getattr(current_user, "nickname", None) or "unknown"
+        db.add(Analysis(
+        username=username,
+        ripeness=final_ripeness,
+        confidence=avg_conf,
+        freshness=freshness,
+        video_path=f"/results/{final_video_path.name}",
+        video_blob=None,
+        created_at=datetime.now(timezone("Asia/Seoul")),
+        ))
+        db.commit()
+        update_daily_analysis_stat(db, datetime.now(timezone("Asia/Seoul")).date())
+    finally:
+        db.close()
+
+
+    # task success
+    db = SessionLocal()
+    try:
+        set_task_db(db, task_id, status="SUCCESS", result=f"/results/{final_video_path.name}")
+    finally:
+        db.close()
+
 # --- 동영상 스트리밍 함수 ---
 @app.get("/results/{filename}")
 def get_result_file(filename: str):
@@ -1067,15 +1356,17 @@ async def start_video_analysis(
                 import gc; gc.collect()
 
             # --- 최종 비디오 재료 (필요한 것만 보관) ---
-            frames_with_dets = []
-            for m in manifest:
-                with open(m["path"], "rb") as fp:
-                    data = fp.read()
-                img = decode_and_cover(data, TARGET_W, TARGET_H)
-                dets = name_to_result[m["filename"]]["detections"]
-                frames_with_dets.append((img, dets))
-
-            create_analysis_video(current_user, task_id, frames_with_dets)
+            if SCROLL_MODE:
+                create_scroll_analysis_video(current_user, task_id, manifest, name_to_result)
+            else:
+                frames_with_dets = []
+                for m in manifest:
+                    with open(m["path"], "rb") as fp:
+                        data = fp.read()
+                    img = decode_and_cover(data, TARGET_W, TARGET_H)
+                    dets = name_to_result[m["filename"]]["detections"]
+                    frames_with_dets.append((img, dets))
+                create_analysis_video(current_user, task_id, frames_with_dets)
 
         except MemoryError:
             with SessionLocal() as db:
