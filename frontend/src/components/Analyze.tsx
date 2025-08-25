@@ -107,7 +107,7 @@ export default function Analyze() {
   const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
   // const hasMedia = analysisStates.length > 0 || Boolean(mainViewerUrl || videoUrl);
   const leftColRef = useRef<HTMLDivElement | null>(null);
-  const [leftColH, setLeftColH] = useState(0);
+  const [leftColH] = useState(0);
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [imgOverlay, setImgOverlay] = useState<{
@@ -116,31 +116,21 @@ export default function Analyze() {
 
   // ✅ 컴포넌트 스코프에 선언 (JSX에서도 사용 가능)
   const calcOverlay = useCallback(() => {
-    if (!imgWrapRef.current || !imgRef.current) return;
+    const wrapEl = imgWrapRef.current;
+    const imgEl  = imgRef.current;
+    if (!wrapEl || !imgEl) return;
 
-    const wrap = imgWrapRef.current.getBoundingClientRect();
-    const naturalW = imgRef.current.naturalWidth || 1;
-    const naturalH = imgRef.current.naturalHeight || 1;
+    const wrap = wrapEl.getBoundingClientRect();
+    const imgR = imgEl.getBoundingClientRect();
 
-    const wrapAR = wrap.width / wrap.height;
-    const imgAR = naturalW / naturalH;
-
-    let drawW = 0, drawH = 0, offX = 0, offY = 0;
-    if (imgAR > wrapAR) {
-      // 좌우 꽉, 상하 레터박스
-      drawW = wrap.width;
-      drawH = wrap.width / imgAR;
-      offX = 0;
-      offY = (wrap.height - drawH) / 2;
-    } else {
-      // 상하 꽉, 좌우 레터박스
-      drawH = wrap.height;
-      drawW = wrap.height * imgAR;
-      offY = 0;
-      offX = (wrap.width - drawW) / 2;
-    }
-    setImgOverlay({ offX, offY, drawW, drawH });
+    setImgOverlay({
+      offX: Math.round(imgR.left - wrap.left),
+      offY: Math.round(imgR.top  - wrap.top),
+      drawW: Math.round(imgR.width),
+      drawH: Math.round(imgR.height),
+    });
   }, []);
+
 
   useEffect(() => {
     return () => {
@@ -205,15 +195,25 @@ export default function Analyze() {
   }, [isAnalyzing]);
 
   useLayoutEffect(() => {
-    if (!leftColRef.current) return;
-    const measure = () =>
-      setLeftColH(Math.round(leftColRef.current!.getBoundingClientRect().height));
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(leftColRef.current);
-    window.addEventListener('resize', measure);
-    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
-  }, []);
+    const roWrap = new ResizeObserver(() => calcOverlay());
+    const roImg  = new ResizeObserver(() => calcOverlay());
+
+    if (imgWrapRef.current) roWrap.observe(imgWrapRef.current);
+    if (imgRef.current)     roImg.observe(imgRef.current);
+
+    const onLoad = () => calcOverlay();
+    imgRef.current?.addEventListener('load', onLoad);
+    window.addEventListener('resize', calcOverlay);
+
+    calcOverlay(); // 최초 1회
+
+    return () => {
+      roWrap.disconnect();
+      roImg.disconnect();
+      window.removeEventListener('resize', calcOverlay);
+      imgRef.current?.removeEventListener('load', onLoad);
+    };
+  }, [calcOverlay]);
 
   // ✅ 관찰자/리스너 세팅
   useLayoutEffect(() => {
@@ -581,7 +581,7 @@ export default function Analyze() {
                     //    박스 위에 공간 있으면 위(-LABEL_H), 없으면 박스 안(0)
                     const labelTop = y - LABEL_H >= 0 ? -LABEL_H : 0;
                     return (
-                      <div key={i} style={{ position:'absolute', left:x, top:y, width:w, height:h, border:'3px solid #FACC15', borderRadius:2, boxSizing: "border-box", }}>
+                      <div key={i} style={{ position:'absolute', left:x, top:y, width:w, height:h, border:'3px solid #FACC15', borderRadius:2, boxSizing: "border-box", overflow: 'hidden',}}>
                         <div
                           className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
                           style={{ left: 0, top: labelTop, maxWidth: "100%", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", }} // 박스 위에 붙이고 화면 위로는 못 나가게

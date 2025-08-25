@@ -421,29 +421,34 @@ def ping():
 
 @app.head("/ping", include_in_schema=False)
 def ping_head():
-    return Response(status_code=200, headers={"Cache-Control": "no-store"})
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
-# 3-5) 헬스체크
 @app.get("/healthz", include_in_schema=False)
 def healthz_get():
-    return PlainTextResponse("ok", headers={"Cache-Control": "no-store"})
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 @app.head("/healthz", include_in_schema=False)
 def healthz_head():
-    return Response(status_code=200, headers={"Cache-Control": "no-store"})
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 # Access 로그 필터링
 import logging
 logger = logging.getLogger("uvicorn.access")
 
-class SkipHealthz(logging.Filter):
+class _SkipNoise(logging.Filter):
     def filter(self, record):
         try:
-            return '"/healthz' not in record.getMessage()
+            msg = record.getMessage()
         except Exception:
             return True
+        # 헬스체크 전부 + HEAD /ping 은 숨기고, GET /ping 은 남김(원하면 지우세요)
+        if '"/healthz' in msg:
+            return False
+        if '"HEAD /ping' in msg:
+            return False
+        return True
 
-logger.addFilter(SkipHealthz())
+logger.addFilter(_SkipNoise())
 
 KOREAN_CLASSES = {
     "freshripe": "신선한 완숙",
