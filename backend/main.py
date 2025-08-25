@@ -286,8 +286,8 @@ TARGET_W = int(os.getenv("TARGET_W", str(MODEL_W)))  # 비디오/표시 해상�
 TARGET_H = int(os.getenv("TARGET_H", str(MODEL_H)))
 
 # 업로드 제한(환경변수로 크게 조정 가능)
-MAX_FILES = int(os.getenv("MAX_FILES", "20"))                 # 프론트는 제한 제거(아래 4번), 서버는 안전빵
-MAX_BYTES = int(os.getenv("MAX_BYTES", str(10*1024*1024)))    # 10MB/파일
+MAX_FILES = int(os.getenv("MAX_FILES", "15"))                 # 프론트는 제한 제거(아래 4번), 서버는 안전빵
+MAX_BYTES = int(os.getenv("MAX_BYTES", str(8*1024*1024)))    # 10MB/파일
 
 #  비디오 생성(멀티 이미지) 최적화 + 해상도 키우기
 INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
@@ -709,73 +709,6 @@ def decode_and_cover(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
         raise ValueError("이미지 디코딩 실패")
     return resize_cover(img, dst_w, dst_h) 
 
-HOLD_SEC  = _float("SECONDS_PER_IMAGE", "1.5")
-# ---------------------------
-# 오버레이(박스/라벨) 그리기
-# ---------------------------
-def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> None:
-    if not detections:
-        return
-
-    # 1) 박스는 OpenCV로, 두께는 해상도 비례
-    thickness = max(2, min(6, (w + h) // 400))
-    for d in detections:
-        bb = d.get("boundingBox") or {}
-        # 정규화 → 픽셀
-        x1 = int(round(bb.get("x", 0.0) * w))
-        y1 = int(round(bb.get("y", 0.0) * h))
-        x2 = int(round((bb.get("x", 0.0) + bb.get("width", 0.0)) * w))
-        y2 = int(round((bb.get("y", 0.0) + bb.get("height", 0.0)) * h))
-
-        # 화면 내로 강제 클램핑
-        x1 = max(0, min(w - 2, x1))
-        y1 = max(0, min(h - 2, y1))
-        x2 = max(x1 + 1, min(w - 1, x2))
-        y2 = max(y1 + 1, min(h - 1, y2))
-
-        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), thickness)
-
-    # 2) 라벨은 PIL로 (한글 폰트), 항상 화면 안에
-    img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-    draw = ImageDraw.Draw(img)
-    font = _get_font(22)
-
-    for d in detections:
-        bb = d.get("boundingBox") or {}
-        x1 = int(round(bb.get("x", 0.0) * w))
-        y1 = int(round(bb.get("y", 0.0) * h))
-
-        ripeness = d.get("ripeness", "")
-        conf_pct = float(d.get("confidence", 0.0)) * 100.0
-        label = f"{ripeness} {conf_pct:.1f}%"
-
-        l, t, r, b = draw.textbbox((0, 0), label, font=font)
-        tw, th = (r - l), (b - t)
-        pad = 6
-        box_w, box_h = tw + pad * 2, th + pad * 2
-
-        # X는 항상 프레임 안
-        x = max(0, min(w - box_w, x1))
-
-        # Y 우선순위: 박스 위 → 박스 안 → 프레임 아래쪽
-        if y1 - box_h - 2 >= 0:
-            y_top = y1 - box_h - 2
-        elif y1 + 2 + box_h <= h:
-            y_top = y1 + 2
-        else:
-            y_top = max(0, h - box_h)
-
-        # 라벨 BG + 텍스트
-        bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
-        img.paste(bg, (x, y_top), bg)
-        draw.text((x + pad, y_top + pad), label, font=font, fill=(255, 255, 255, 255))
-
-    frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
-        
-# ---------------------------------------
-# 비디오 작성: 좌→우 패닝(확대 + 이동)으로 실시간 스캔 느낌
-# ---------------------------------------
-
 # --- 여백 없이 정사이즈로 맞추기(cover)
 def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
     h, w = img_bgr.shape[:2]
@@ -788,411 +721,139 @@ def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
     y1 = max(0, (nh - out_h) // 2)
     return resized[y1:y1 + out_h, x1:x1 + out_w].copy()
 
-def make_long_strip(frames_with_dets: List[Tuple[np.ndarray, list]], out_w: int, out_h: int) -> np.ndarray:
-    tiles = []
-    for img_bgr, dets in frames_with_dets:
-        # 이미 (out_w,out_h)이면 그대로, 아니면 한 번만 보정
-        if img_bgr.shape[1] != out_w or img_bgr.shape[0] != out_h:
-            img_bgr = resize_cover(img_bgr, out_w, out_h)
-
-        canvas = img_bgr.copy()
-        draw_overlay(canvas, dets, out_w, out_h)
-        tiles.append(canvas)
-
-    return np.hstack(tiles) if tiles else np.zeros((out_h, out_w, 3), dtype=np.uint8)
-
-def write_video(frames_with_dets, out_path, fps=VIDEO_FPS, hold_sec=HOLD_SEC):
-    out_w, out_h = TARGET_W, TARGET_H
-
-    # ffmpeg 파이프 준비 (없으면 OpenCV)
-    using_ffmpeg, proc, vw = False, None, None
-    if shutil.which("ffmpeg"):
-        cmd = [
-            "ffmpeg","-y","-loglevel","error",
-            "-f","rawvideo","-pix_fmt","bgr24",
-            "-s", f"{out_w}x{out_h}","-r", str(fps), "-i","-",
-            "-c:v","libx264","-preset","veryfast","-crf","28",
-            "-threads","1" if CPU_CORES <= 2 else "2",
-            "-max_muxing_queue_size","64",     # 🔻 내부 큐 크기 축소
-            "-bufsize","2M",                   # 🔻 파이프 버퍼 힌트 감소
-            "-pix_fmt","yuv420p","-movflags","+faststart", out_path
-        ]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if proc.stdin is None:
-            raise RuntimeError("failed to open ffmpeg stdin")
-        using_ffmpeg = True
-    else:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        vw = cv2.VideoWriter(out_path, fourcc, fps, (out_w, out_h))
-        if not vw.isOpened():
-            raise RuntimeError("VideoWriter open failed")
-
-    # ✅ 프레임을 만들자마자 바로 한 장씩 씁니다(리스트에 쌓지 않음)
-    try:
-        repeats = max(1, int(round(hold_sec * fps)))
-        for img_bgr, dets in frames_with_dets:
-            if img_bgr.shape[1] != out_w or img_bgr.shape[0] != out_h:
-                img_bgr = resize_cover(img_bgr, out_w, out_h)
-            canvas = img_bgr.copy()
-            draw_overlay(canvas, dets, out_w, out_h)
-            for _ in range(repeats):
-                if using_ffmpeg:
-                    proc.stdin.write(canvas.tobytes())
-                else:
-                    vw.write(canvas)
-    finally:
-        if using_ffmpeg:
-            try: proc.stdin.close()
-            except: pass
-            proc.wait(timeout=30)
-        elif vw is not None:
-            vw.release()
-
-# -------------------------------------------------------
-# create_analysis_video (DB 저장까지 포함한 완전판 함수)
-# -------------------------------------------------------
-def create_analysis_video(
-    current_user,
-    task_id: str,
-    frames_with_dets: List[Tuple[np.ndarray, list]],
-) -> None:
-    final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
-
-    db = SessionLocal()
-    try:
-        set_task_db(db, task_id, status="PROCESSING", result=None)
-    finally:
-        db.close()
-    print(f"[{task_id}] 비디오 생성 시작... (frames={len(frames_with_dets)})")
-
-    try:
-        write_video(frames_with_dets, str(final_video_path), fps=VIDEO_FPS, hold_sec=HOLD_SEC)
-
-        if not final_video_path.exists() or final_video_path.stat().st_size == 0:
-            raise IOError("최종 MP4 파일이 비어 있음")
-
-        all_dets = [d for _, dets in frames_with_dets for d in dets]
-        avg_conf = round(sum(d.get("confidence", 0.0) for d in all_dets) / len(all_dets), 3) if all_dets else 0.0
-        labels   = [d.get("ripeness", "분석불가") for d in all_dets]
-        final_ripeness = Counter(labels).most_common(1)[0][0] if labels else "분석불가"
-        freshness = LABEL_SCORE.get(final_ripeness, 0.0)
-        
-        db2 = SessionLocal()
-        try:
-            increment_daily_box_counts_bulk(db2, frames_with_dets)   # <-- 추가
-        except Exception as e:
-            print("[warn] increment_daily_box_counts_bulk failed:", e)
-        finally:
-            db2.close()
-
-        db = SessionLocal()
-        try:
-            username = getattr(current_user, "nickname", None) or "unknown"
-            db.add(Analysis(
-                username=username,
-                ripeness=final_ripeness,
-                confidence=avg_conf,
-                freshness=freshness,
-                video_path=f"/results/{final_video_path.name}",
-                video_blob=None,
-                created_at=datetime.now(timezone("Asia/Seoul")),
-            ))
-            db.commit()
-            update_daily_analysis_stat(db, datetime.now(timezone("Asia/Seoul")).date())
-        finally:
-            db.close()
-
-        db = SessionLocal()
-        try:
-            set_task_db(db, task_id, status="SUCCESS", result=f"/results/{final_video_path.name}")
-        finally:
-            db.close()
-    except Exception as e:
-        db = SessionLocal()
-        try:
-            set_task_db(db, task_id, status="FAILURE", result=str(e))
-        finally:
-            db.close()
-        print(f"[{task_id}] ❌ 비디오 생성 실패:", repr(e))
-
-
 # ▼ Environment knobs
-SCROLL_MODE = os.getenv("SCROLL_MODE", "1") == "1" # enable new scroll pipeline
 SCROLL_FPS = int(os.getenv("SCROLL_FPS", "15"))
-SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6")) # time a single tile stays on screen while panning
-DETECT_EVERY_FRAME = os.getenv("DETECT_EVERY_FRAME", "0") == "1" # turn on if you want frame-by-frame YOLO (slower)
-SHOW_LABELS = os.getenv("SHOW_LABELS", "1") == "1"
+SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6"))
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers for the scroll video pipeline
 # ────────────────────────────────────────────────────────────────────────────────
+def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
+    h, w = img_bgr.shape[:2]
+    scale = max(out_w / w, out_h / h)
+    nw, nh = int(round(w * scale)), int(round(h * scale))
+    resized = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    x1 = max(0, (nw - out_w) // 2)
+    y1 = max(0, (nh - out_h) // 2)
+    return resized[y1:y1 + out_h, x1:x1 + out_w].copy()
+
+def decode_and_cover(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
+    arr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("이미지 디코딩 실패")
+    return resize_cover(img, dst_w, dst_h)
 
 def _tile_images_cover(img_paths: List[str], out_w: int, out_h: int) -> List[np.ndarray]:
-    """Load & cover-resize each image to (out_w,out_h)."""
     tiles = []
     for p in img_paths:
         with open(p, "rb") as fp:
             data = fp.read()
-        img = decode_and_cover(data, out_w, out_h)
-        tiles.append(img)
+        tiles.append(decode_and_cover(data, out_w, out_h))
     return tiles
 
-
-def _detect_tiles(tiles: List[np.ndarray]) -> List[list]:
-    """Run YOLO once per tile (batch) and return per-tile detections."""
-    if not tiles:
-        return []
-    det_lists = run_yolo_np_bgr(tiles, imgsz=(MODEL_W, MODEL_H,), conf=FINAL_CONF, max_det=100)
-    # run_yolo_np_bgr returns a list when input is a list; ensure type
-    return det_lists if isinstance(det_lists, list) else [det_lists]
-
-
-def _draw_overlay_px(frame_bgr: np.ndarray, boxes_px: List[dict]) -> None:
-    """Draw boxes/labels given in *frame* pixel coordinates (already clipped)."""
-    if not boxes_px:
-        return
-
-    h, w = frame_bgr.shape[:2]
-    thickness = max(2, min(6, (w + h) // 400))
-
-    # 1) Rectangles via OpenCV
-    for b in boxes_px:
-        cv2.rectangle(frame_bgr, (b["x1"], b["y1"]), (b["x2"], b["y2"]), (0, 255, 255), thickness)
-
-    if SHOW_LABELS:
-        # 2) Labels via PIL (Korean font-safe)
-        img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-        draw = ImageDraw.Draw(img)
-        font = _get_font(22)
-
-        for b in boxes_px:
-            label = f"{b.get('ripeness','')} {b.get('confidence',0.0)*100:.1f}%"
-            l, t, r, btm = draw.textbbox((0, 0), label, font=font)
-            tw, th = (r - l), (btm - t)
-            pad = 6
-            box_w, box_h = tw + pad * 2, th + pad * 2
-            x = max(0, min(w - box_w, b["x1"]))
-            # prefer above box if room else below else bottom align
-            if b["y1"] - box_h - 2 >= 0:
-                y = b["y1"] - box_h - 2
-            elif b["y2"] + 2 + box_h <= h:
-                y = b["y2"] + 2
-            else:
-                y = max(0, h - box_h)
-            bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
-            img.paste(bg, (x, y), bg)
-            draw.text((x + pad, y + pad), label, font=font, fill=(255, 255, 255, 255))
-
-
-        frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
-
-
 def _compose_frame_from_tiles(tile_left: np.ndarray, tile_right: np.ndarray, offset: int, view_w: int) -> np.ndarray:
-    """
-    offset 픽셀만큼 좌측 타일을 밀어내며, 남는 부분은 우측 타일에서 채워 한 프레임 생성.
-    tile_* 크기는 (TARGET_H, TARGET_W, 3) 이어야 함.
-    """
-    h = tile_left.shape[0]
-    # 좌측 타일의 [offset: view_w] + 우측 타일의 [:offset]
     left_part  = tile_left[:, offset:view_w]
     right_part = tile_right[:, :offset] if offset > 0 else None
-    if right_part is None or right_part.shape[1] == 0:
-        return left_part.copy()
-    return np.hstack([left_part, right_part])
+    return left_part.copy() if right_part is None or right_part.shape[1] == 0 else np.hstack([left_part, right_part])
 
-
-def _shift_and_clip_boxes(boxes_px: List[dict], dx_in_tile: int, view_w: int, view_h: int, from_right_tile: bool) -> List[dict]:
-    """
-    from_right_tile=False 이면 '현재 타일'의 박스 → -dx_in_tile 만큼 이동.
-    from_right_tile=True  이면 '다음 타일'의 박스 → (view_w - dx_in_tile) 만큼 이동.
-    이동 후 뷰포트(0~view_w) 밖은 클립.
-    """
-    shift = (view_w - dx_in_tile) if from_right_tile else -dx_in_tile
-    out = []
-    for b in boxes_px:
-        x1 = b["x1"] + shift
-        x2 = b["x2"] + shift
-        y1 = b["y1"]; y2 = b["y2"]
-        if x2 <= 0 or x1 >= view_w:  # 가로 겹침 없음
-            continue
-        vx1 = max(0, x1); vx2 = min(view_w - 1, x2)
-        vy1 = max(0, min(view_h - 2, y1))
-        vy2 = max(vy1 + 1, min(view_h - 1, y2))
-        if vx2 <= vx1: 
-            continue
-        out.append({"x1": vx1, "y1": vy1, "x2": vx2, "y2": vy2,
-                    "ripeness": b.get("ripeness",""), "confidence": b.get("confidence",0.0)})
-    return out
-
-
-def _tile_dets_to_px(dets: List[dict], tile_w: int, tile_h: int) -> List[dict]:
-    px = []
-    for d in dets or []:
-        bb = d.get("boundingBox", {})
-        x1 = int(round(bb.get("x", 0.0) * tile_w))
-        y1 = int(round(bb.get("y", 0.0) * tile_h))
-        x2 = int(round((bb.get("x", 0.0) + bb.get("width", 0.0)) * tile_w))
-        y2 = int(round((bb.get("y", 0.0) + bb.get("height", 0.0)) * tile_h))
-        px.append({"x1": x1, "y1": y1, "x2": max(x1+1, x2), "y2": max(y1+1, y2),
-                   "ripeness": d.get("ripeness",""), "confidence": float(d.get("confidence",0.0))})
-    return px
-
-
-def _write_scroll_video_stream(tiles: List[np.ndarray],
-                               per_tile_boxes_px: List[List[dict]],
-                               out_path: str,
-                               fps: int) -> None:
-    """
-    긴 배너를 만들지 않고, 타일 2장만으로 스크롤 프레임을 스트리밍 생성.
-    메모리 O(타일 2장).
-    """
+def _write_scroll_video_stream_raw(tiles: List[np.ndarray], out_path: str, fps: int) -> None:
     view_w, view_h = TARGET_W, TARGET_H
     n = len(tiles)
     if n == 0:
         raise ValueError("no tiles")
-
     if n == 1:
-        # 스크롤할 게 없으면 그대로 hold
-        return write_video([(tiles[0], [])], out_path, fps=fps, hold_sec=max(1.0, SECONDS_PER_TILE))
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        vw = cv2.VideoWriter(out_path, fourcc, fps, (view_w, view_h))
+        if not vw.isOpened(): raise RuntimeError("VideoWriter open failed")
+        for _ in range(max(1, int(round(SECONDS_PER_TILE * fps)))): vw.write(tiles[0])
+        vw.release(); return
 
-    # 인코더 준비
     using_ffmpeg, proc, vw = False, None, None
     if shutil.which("ffmpeg"):
-        cmd = ["ffmpeg","-y","-loglevel","error",
-               "-f","rawvideo","-pix_fmt","bgr24",
+        cmd = ["ffmpeg","-y","-loglevel","error","-f","rawvideo","-pix_fmt","bgr24",
                "-s", f"{view_w}x{view_h}","-r", str(fps), "-i","-",
                "-c:v","libx264","-preset","ultrafast","-crf","28",
                "-threads","1" if (os.cpu_count() or 2) <= 2 else "2",
                "-max_muxing_queue_size","64","-bufsize","2M",
                "-pix_fmt","yuv420p","-movflags","+faststart", out_path]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if proc.stdin is None:
-            raise RuntimeError("failed to open ffmpeg stdin")
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if proc.stdin is None: raise RuntimeError("failed to open ffmpeg stdin")
         using_ffmpeg = True
     else:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         vw = cv2.VideoWriter(out_path, fourcc, fps, (view_w, view_h))
-        if not vw.isOpened():
-            raise RuntimeError("VideoWriter open failed")
+        if not vw.isOpened(): raise RuntimeError("VideoWriter open failed")
 
-    # 한 타일을 화면에 머무르는 프레임 수
     frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
-    try:
-        # 각 타일 경계마다 offset=0..view_w-1로 부드럽게 이동
-        for idx in range(n-1):
-            left  = tiles[idx]
-            right = tiles[idx+1]
-            left_boxes_px  = per_tile_boxes_px[idx]
-            right_boxes_px = per_tile_boxes_px[idx+1]
+    step = max(1, view_w // frames_per_tile)
 
-            # offset을 view_w에 맞춰 늘리면 길~게 움직임 → frames_per_tile로 downsample
-            # step 픽셀마다 한 프레임
-            step = max(1, view_w // frames_per_tile)
+    try:
+        for idx in range(n - 1):
+            left, right = tiles[idx], tiles[idx + 1]
             for off in range(0, view_w, step):
                 frame = _compose_frame_from_tiles(left, right, off, view_w)
-                # 오버레이(좌/우 타일의 박스를 각각 이동/클립 후 합치기)
-                vis = _shift_and_clip_boxes(left_boxes_px,  off, view_w, view_h, from_right_tile=False)
-                vis += _shift_and_clip_boxes(right_boxes_px, off, view_w, view_h, from_right_tile=True)
-                _draw_overlay_px(frame, vis)
-
-                if using_ffmpeg:
-                    proc.stdin.write(frame.tobytes())
-                else:
-                    vw.write(frame)
-
-        # 마지막 타일은 살짝 더 보여주기(정지 프레임)
+                (proc.stdin.write if using_ffmpeg else vw.write)(frame if using_ffmpeg else frame)
         for _ in range(frames_per_tile):
             frame = tiles[-1].copy()
-            _draw_overlay_px(frame, per_tile_boxes_px[-1])
-            if using_ffmpeg:
-                proc.stdin.write(frame.tobytes())
-            else:
-                vw.write(frame)
+            (proc.stdin.write if using_ffmpeg else vw.write)(frame if using_ffmpeg else frame)
     finally:
         if using_ffmpeg:
             try: proc.stdin.close()
             except: pass
             proc.wait(timeout=30)
-        elif vw is not None:
+        else:
             vw.release()
 
+def detect_video_and_write(input_path: str, output_path: str) -> None:
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened(): raise RuntimeError("cannot open input video")
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps    = cap.get(cv2.CAP_PROP_FPS) or SCROLL_FPS
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    if not out.isOpened(): cap.release(); raise RuntimeError("cannot open output video")
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret: break
+            results = model(frame)
+            out.write(results[0].plot())
+    finally:
+        cap.release(); out.release()
 
-def create_scroll_analysis_video(current_user, task_id: str,
-                                 manifest: List[Dict[str, str]],
-                                 name_to_result: Dict[str, dict]) -> None:
+def create_scroll_then_detect_video(current_user, task_id: str, manifest: List[Dict[str, str]]) -> None:
     view_w, view_h = TARGET_W, TARGET_H
+    raw_video_path   = RESULTS_DIR / f"{task_id}_raw.mp4"
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
 
-    # 1) 타일 준비 (메모리: n × view_w×view_h×3)
-    img_paths = [m["path"] for m in manifest]
-    tiles = _tile_images_cover(img_paths, view_w, view_h)
+    tiles = _tile_images_cover([m["path"] for m in manifest], view_w, view_h)
+    _write_scroll_video_stream_raw(tiles, str(raw_video_path), fps=SCROLL_FPS)
+    if not raw_video_path.exists() or raw_video_path.stat().st_size == 0: raise IOError("raw scroll video empty")
 
-    # 2) 누락된 감지 채우기
-    missing = []
-    for m in manifest:
-        r = name_to_result.get(m["filename"]) or {}
-        if not r.get("detections"):
-            missing.append(m)
-    if missing:
-        need_paths = [m["path"] for m in missing]
-        need_tiles = _tile_images_cover(need_paths, view_w, view_h)
-        det_lists = _detect_tiles(need_tiles)
-        for m, dets in zip(missing, det_lists):
-            avg_conf = round(sum(d.get("confidence", 0.0) for d in dets) / len(dets), 4) if dets else 0.0
-            name_to_result[m["filename"]] = {
-                "filename": m["filename"], "detections": dets, "avg_confidence": avg_conf, "processed": True
-            }
+    detect_video_and_write(str(raw_video_path), str(final_video_path))
+    if not final_video_path.exists() or final_video_path.stat().st_size == 0: raise IOError("final video empty")
 
-    per_tile_dets = [ name_to_result.get(m["filename"], {}).get("detections", []) for m in manifest ]
-    per_tile_boxes_px = [_tile_dets_to_px(d, view_w, view_h) for d in per_tile_dets]
-
-    # 3) 스트리밍 생성 (long_img 없음)
-    _write_scroll_video_stream(tiles, per_tile_boxes_px, str(final_video_path), fps=SCROLL_FPS)
-
-    if not final_video_path.exists() or final_video_path.stat().st_size == 0:
-        raise IOError("최종 MP4 파일이 비어 있음")
-
-    # 4) 통계 & DB
-    all_dets = [d for dets in per_tile_dets for d in (dets or [])]
-    avg_conf = round(sum(d.get("confidence", 0.0) for d in all_dets) / len(all_dets), 3) if all_dets else 0.0
-    labels   = [d.get("ripeness", "분석불가") for d in all_dets]
-    final_ripeness = Counter(labels).most_common(1)[0][0] if labels else "분석불가"
-    freshness = LABEL_SCORE.get(final_ripeness, 0.0)
-
-    try:
-        pseudo = [ (None, dets or []) for dets in per_tile_dets ]
-        db2 = SessionLocal(); increment_daily_box_counts_bulk(db2, pseudo); db2.close()
-    except Exception as e:
-        print("[warn] increment_daily_box_counts_bulk (scroll) failed:", e)
+    try: raw_video_path.unlink(missing_ok=True)
+    except Exception: pass
 
     db = SessionLocal()
     try:
         username = getattr(current_user, "nickname", None) or "unknown"
         db.add(Analysis(
-            username=username,
-            ripeness=final_ripeness,
-            confidence=avg_conf,
-            freshness=freshness,
+            username=username, ripeness="영상기반",
+            confidence=0.0, freshness=0.0,
             video_path=f"/results/{final_video_path.name}",
-            video_blob=None,
-            created_at=datetime.now(timezone("Asia/Seoul")),
+            video_blob=None, created_at=datetime.now(timezone("Asia/Seoul")),
         ))
-        db.commit()
-        update_daily_analysis_stat(db, datetime.now(timezone("Asia/Seoul")).date())
+        db.commit(); update_daily_analysis_stat(db, datetime.now(timezone("Asia/Seoul")).date())
     finally:
         db.close()
 
     db = SessionLocal()
-    try:
-        set_task_db(db, task_id, status="SUCCESS", result=f"/results/{final_video_path.name}")
-    finally:
-        db.close()
-
-    # 🔻 메모리 정리
-    del tiles, per_tile_dets, per_tile_boxes_px
-    import gc; gc.collect()
+    try: set_task_db(db, task_id, status="SUCCESS", result=f"/results/{final_video_path.name}")
+    finally: db.close()
 
 # --- 동영상 스트리밍 함수 ---
 @app.get("/results/{filename}")
@@ -1383,18 +1044,8 @@ async def start_video_analysis(
                 del batch_imgs, det_lists
                 import gc; gc.collect()
 
-            # --- 최종 비디오 재료 (필요한 것만 보관) ---
-            if SCROLL_MODE:
-                create_scroll_analysis_video(current_user, task_id, manifest, name_to_result)
-            else:
-                frames_with_dets = []
-                for m in manifest:
-                    with open(m["path"], "rb") as fp:
-                        data = fp.read()
-                    img = decode_and_cover(data, TARGET_W, TARGET_H)
-                    dets = name_to_result[m["filename"]]["detections"]
-                    frames_with_dets.append((img, dets))
-                create_analysis_video(current_user, task_id, frames_with_dets)
+            # --- 최종 비디오---
+            create_scroll_then_detect_video(current_user, task_id, manifest)
 
         except MemoryError:
             with SessionLocal() as db:
@@ -1631,7 +1282,6 @@ def get_summary_stats():
 # 서버 제한값을 환경변수화 + 프론트에 자동 전파
 
 def _int(name, default): return int(os.getenv(name, str(default)))
-def _float(name, default): return float(os.getenv(name, str(default)))
 
 @settings_router.get("")
 @settings_router.get("/")
@@ -1639,11 +1289,10 @@ def get_settings():
     return {
         "MODEL_W": _int("MODEL_W", 640),
         "MODEL_H": _int("MODEL_H", 480),
-        "MAX_FILES": _int("MAX_FILES", 20),
-        "MAX_BYTES": _int("MAX_BYTES", 10*1024*1024),
+        "MAX_FILES": _int("MAX_FILES", 15),
+        "MAX_BYTES": _int("MAX_BYTES", 8*1024*1024),
         "VIDEO_FPS": VIDEO_FPS,          # ← 변수 사용
         "INFER_EVERY_N_FRAMES": _int("INFER_EVERY_N_FRAMES", 10),
-        "SECONDS_PER_IMAGE": HOLD_SEC,   # ← 변수 사용
     }
 
 
