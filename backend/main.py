@@ -948,38 +948,6 @@ def _detect_tiles(tiles: List[np.ndarray]) -> List[list]:
     return det_lists if isinstance(det_lists, list) else [det_lists]
 
 
-def _hstack_no_padding(tiles: List[np.ndarray], out_h: int) -> np.ndarray:
-    """Horizontal concat with no padding. All tiles must be same H and W."""
-    if not tiles:
-        return np.zeros((out_h, TARGET_W, 3), dtype=np.uint8)
-    # ensure exact (TARGET_W, TARGET_H)
-    fixed = [t if (t.shape[0] == out_h and t.shape[1] == TARGET_W) else resize_cover(t, TARGET_W, out_h) for t in tiles]
-    return np.hstack(fixed)
-
-
-def _project_tile_dets_to_long_px(per_tile_dets: List[list], tile_w: int, tile_h: int) -> List[dict]:
-    """Map each tile's normalized boxes to absolute pixel coords in the long banner."""
-    long_boxes = []
-    for i, dets in enumerate(per_tile_dets):
-        x_off = i * tile_w
-        for d in dets or []:
-            bb = d.get("boundingBox", {})
-            # normalized in [0,1] → pixel in tile
-            x1 = int(round(bb.get("x", 0.0) * tile_w))
-            y1 = int(round(bb.get("y", 0.0) * tile_h))
-            x2 = int(round((bb.get("x", 0.0) + bb.get("width", 0.0)) * tile_w))
-            y2 = int(round((bb.get("y", 0.0) + bb.get("height", 0.0)) * tile_h))
-            # shift to long image coords
-            long_boxes.append({
-                "x1": x1 + x_off,
-                "y1": y1,
-                "x2": max(x1 + 1, x2) + x_off,
-                "y2": max(y1 + 1, y2),
-                "ripeness": d.get("ripeness", ""),
-                "confidence": float(d.get("confidence", 0.0)),
-            })
-    return long_boxes
-
 def _draw_overlay_px(frame_bgr: np.ndarray, boxes_px: List[dict]) -> None:
     """Draw boxes/labels given in *frame* pixel coordinates (already clipped)."""
     if not boxes_px:
@@ -1019,58 +987,85 @@ def _draw_overlay_px(frame_bgr: np.ndarray, boxes_px: List[dict]) -> None:
 
         frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
-def _visible_boxes_in_window(long_boxes: List[dict], dx: int, view_w: int, view_h: int) -> List[dict]:
-    """Clip absolute long-image boxes to the current [dx, dx+view_w) view window."""
-    visible = []
-    x0, x1 = dx, dx + view_w
-    for b in long_boxes:
-        if b["x2"] <= x0 or b["x1"] >= x1:
-            continue # no horizontal overlap
-        # clip to view window
-        vx1 = max(0, b["x1"] - dx)
-        vx2 = min(view_w - 1, b["x2"] - dx)
-        vy1 = max(0, min(view_h - 2, b["y1"]))
-        vy2 = max(vy1 + 1, min(view_h - 1, b["y2"]))
-        if vx2 <= vx1:
+
+def _compose_frame_from_tiles(tile_left: np.ndarray, tile_right: np.ndarray, offset: int, view_w: int) -> np.ndarray:
+    """
+    offset 픽셀만큼 좌측 타일을 밀어내며, 남는 부분은 우측 타일에서 채워 한 프레임 생성.
+    tile_* 크기는 (TARGET_H, TARGET_W, 3) 이어야 함.
+    """
+    h = tile_left.shape[0]
+    # 좌측 타일의 [offset: view_w] + 우측 타일의 [:offset]
+    left_part  = tile_left[:, offset:view_w]
+    right_part = tile_right[:, :offset] if offset > 0 else None
+    if right_part is None or right_part.shape[1] == 0:
+        return left_part.copy()
+    return np.hstack([left_part, right_part])
+
+
+def _shift_and_clip_boxes(boxes_px: List[dict], dx_in_tile: int, view_w: int, view_h: int, from_right_tile: bool) -> List[dict]:
+    """
+    from_right_tile=False 이면 '현재 타일'의 박스 → -dx_in_tile 만큼 이동.
+    from_right_tile=True  이면 '다음 타일'의 박스 → (view_w - dx_in_tile) 만큼 이동.
+    이동 후 뷰포트(0~view_w) 밖은 클립.
+    """
+    shift = (view_w - dx_in_tile) if from_right_tile else -dx_in_tile
+    out = []
+    for b in boxes_px:
+        x1 = b["x1"] + shift
+        x2 = b["x2"] + shift
+        y1 = b["y1"]; y2 = b["y2"]
+        if x2 <= 0 or x1 >= view_w:  # 가로 겹침 없음
             continue
-        vb = {"x1": vx1, "y1": vy1, "x2": vx2, "y2": vy2,
-                "ripeness": b.get("ripeness",""), "confidence": b.get("confidence",0.0)}
-        visible.append(vb)
-    return visible
+        vx1 = max(0, x1); vx2 = min(view_w - 1, x2)
+        vy1 = max(0, min(view_h - 2, y1))
+        vy2 = max(vy1 + 1, min(view_h - 1, y2))
+        if vx2 <= vx1: 
+            continue
+        out.append({"x1": vx1, "y1": vy1, "x2": vx2, "y2": vy2,
+                    "ripeness": b.get("ripeness",""), "confidence": b.get("confidence",0.0)})
+    return out
 
-def _write_scroll_video(long_img: np.ndarray,
-                        long_boxes_px: List[dict],
-                        out_path: str,
-                        fps: int,
-                        detect_every_frame: bool = False) -> None:
-    """Window-scan across long_img to produce scrolling video."""
+
+def _tile_dets_to_px(dets: List[dict], tile_w: int, tile_h: int) -> List[dict]:
+    px = []
+    for d in dets or []:
+        bb = d.get("boundingBox", {})
+        x1 = int(round(bb.get("x", 0.0) * tile_w))
+        y1 = int(round(bb.get("y", 0.0) * tile_h))
+        x2 = int(round((bb.get("x", 0.0) + bb.get("width", 0.0)) * tile_w))
+        y2 = int(round((bb.get("y", 0.0) + bb.get("height", 0.0)) * tile_h))
+        px.append({"x1": x1, "y1": y1, "x2": max(x1+1, x2), "y2": max(y1+1, y2),
+                   "ripeness": d.get("ripeness",""), "confidence": float(d.get("confidence",0.0))})
+    return px
+
+
+def _write_scroll_video_stream(tiles: List[np.ndarray],
+                               per_tile_boxes_px: List[List[dict]],
+                               out_path: str,
+                               fps: int) -> None:
+    """
+    긴 배너를 만들지 않고, 타일 2장만으로 스크롤 프레임을 스트리밍 생성.
+    메모리 O(타일 2장).
+    """
     view_w, view_h = TARGET_W, TARGET_H
-    H, W = long_img.shape[:2]
-    if W <= view_w:
-        # Not enough width to scroll → fall back to single-frame hold
-        return write_video([(long_img[:, :view_w].copy(), [])], out_path, fps=fps, hold_sec=max(1.0, SECONDS_PER_TILE))
+    n = len(tiles)
+    if n == 0:
+        raise ValueError("no tiles")
 
+    if n == 1:
+        # 스크롤할 게 없으면 그대로 hold
+        return write_video([(tiles[0], [])], out_path, fps=fps, hold_sec=max(1.0, SECONDS_PER_TILE))
 
-    total_tiles = max(1, W // view_w)
-    duration_sec = max(1.0, SECONDS_PER_TILE * total_tiles)
-    total_frames = max(2, int(round(duration_sec * fps)))
-
-
-    step = (W - view_w) / (total_frames - 1) # float step; cover whole span exactly once
-
-
-    # choose ffmpeg if available
+    # 인코더 준비
     using_ffmpeg, proc, vw = False, None, None
     if shutil.which("ffmpeg"):
-        cmd = [
-            "ffmpeg","-y","-loglevel","error",
-            "-f","rawvideo","-pix_fmt","bgr24",
-            "-s", f"{view_w}x{view_h}","-r", str(fps), "-i","-",
-            "-c:v","libx264","-preset","veryfast","-crf","23",
-            "-threads","1" if CPU_CORES <= 2 else "2",
-            "-max_muxing_queue_size","64","-bufsize","2M",
-            "-pix_fmt","yuv420p","-movflags","+faststart", out_path
-        ]
+        cmd = ["ffmpeg","-y","-loglevel","error",
+               "-f","rawvideo","-pix_fmt","bgr24",
+               "-s", f"{view_w}x{view_h}","-r", str(fps), "-i","-",
+               "-c:v","libx264","-preset","ultrafast","-crf","28",
+               "-threads","1" if (os.cpu_count() or 2) <= 2 else "2",
+               "-max_muxing_queue_size","64","-bufsize","2M",
+               "-pix_fmt","yuv420p","-movflags","+faststart", out_path]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if proc.stdin is None:
@@ -1082,37 +1077,39 @@ def _write_scroll_video(long_img: np.ndarray,
         if not vw.isOpened():
             raise RuntimeError("VideoWriter open failed")
 
-
+    # 한 타일을 화면에 머무르는 프레임 수
+    frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
     try:
-        for i in range(total_frames):
-            dx = int(round(i * step))
-            frame = long_img[:, dx:dx + view_w]
-            if frame.shape[1] != view_w:
-                # right edge safety padding (should rarely happen due to rounding)
-                pad = view_w - frame.shape[1]
-                frame = cv2.copyMakeBorder(frame, 0, 0, 0, pad, cv2.BORDER_CONSTANT, value=0)
+        # 각 타일 경계마다 offset=0..view_w-1로 부드럽게 이동
+        for idx in range(n-1):
+            left  = tiles[idx]
+            right = tiles[idx+1]
+            left_boxes_px  = per_tile_boxes_px[idx]
+            right_boxes_px = per_tile_boxes_px[idx+1]
 
+            # offset을 view_w에 맞춰 늘리면 길~게 움직임 → frames_per_tile로 downsample
+            # step 픽셀마다 한 프레임
+            step = max(1, view_w // frames_per_tile)
+            for off in range(0, view_w, step):
+                frame = _compose_frame_from_tiles(left, right, off, view_w)
+                # 오버레이(좌/우 타일의 박스를 각각 이동/클립 후 합치기)
+                vis = _shift_and_clip_boxes(left_boxes_px,  off, view_w, view_h, from_right_tile=False)
+                vis += _shift_and_clip_boxes(right_boxes_px, off, view_w, view_h, from_right_tile=True)
+                _draw_overlay_px(frame, vis)
 
-            canvas = frame.copy()
+                if using_ffmpeg:
+                    proc.stdin.write(frame.tobytes())
+                else:
+                    vw.write(frame)
 
-
-            if detect_every_frame:
-                # run YOLO on the current view window
-                dets = run_yolo_np_bgr(canvas, imgsz=(MODEL_W, MODEL_H,), conf=FINAL_CONF, max_det=100)
-                dets = dets if isinstance(dets, list) else [dets]
-                det = dets[0] if dets else []
-                draw_overlay(canvas, det, view_w, view_h)
-            else:
-                vis = _visible_boxes_in_window(long_boxes_px, dx, view_w, view_h)
-                _draw_overlay_px(canvas, vis)
-
-
+        # 마지막 타일은 살짝 더 보여주기(정지 프레임)
+        for _ in range(frames_per_tile):
+            frame = tiles[-1].copy()
+            _draw_overlay_px(frame, per_tile_boxes_px[-1])
             if using_ffmpeg:
-                proc.stdin.write(canvas.tobytes())
+                proc.stdin.write(frame.tobytes())
             else:
-                vw.write(canvas)
-        del long_boxes_px
-
+                vw.write(frame)
     finally:
         if using_ffmpeg:
             try: proc.stdin.close()
@@ -1122,19 +1119,17 @@ def _write_scroll_video(long_img: np.ndarray,
             vw.release()
 
 
-def create_scroll_analysis_video(current_user, task_id: str, manifest: List[Dict[str, str]], # [{filename, path}, ...]
-                                  name_to_result: Dict[str, dict], # filename → {detections, avg_confidence, ...}
-                                  ) -> None:
+def create_scroll_analysis_video(current_user, task_id: str,
+                                 manifest: List[Dict[str, str]],
+                                 name_to_result: Dict[str, dict]) -> None:
     view_w, view_h = TARGET_W, TARGET_H
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
 
-
-    # 1) Build tiles and long image
+    # 1) 타일 준비 (메모리: n × view_w×view_h×3)
     img_paths = [m["path"] for m in manifest]
     tiles = _tile_images_cover(img_paths, view_w, view_h)
 
-
-    # If we don't yet have dets for all tiles, compute them now (batch)
+    # 2) 누락된 감지 채우기
     missing = []
     for m in manifest:
         r = name_to_result.get(m["filename"]) or {}
@@ -1146,69 +1141,58 @@ def create_scroll_analysis_video(current_user, task_id: str, manifest: List[Dict
         det_lists = _detect_tiles(need_tiles)
         for m, dets in zip(missing, det_lists):
             avg_conf = round(sum(d.get("confidence", 0.0) for d in dets) / len(dets), 4) if dets else 0.0
-            name_to_result[m["filename"]] = {"filename": m["filename"], "detections": dets, "avg_confidence": avg_conf}
+            name_to_result[m["filename"]] = {
+                "filename": m["filename"], "detections": dets, "avg_confidence": avg_conf, "processed": True
+            }
 
+    per_tile_dets = [ name_to_result.get(m["filename"], {}).get("detections", []) for m in manifest ]
+    per_tile_boxes_px = [_tile_dets_to_px(d, view_w, view_h) for d in per_tile_dets]
 
-    per_tile_dets = [ (name_to_result.get(m["filename"], {}).get("detections", [])) for m in manifest ]
-    long_img = _hstack_no_padding(tiles, view_h)
-
-
-    # 2) Prepare long-image absolute boxes (for fast overlay)
-    long_boxes_px = _project_tile_dets_to_long_px(per_tile_dets, view_w, view_h)
-
-
-    # 3) Stream out scrolling video
-    _write_scroll_video(long_img, long_boxes_px, str(final_video_path), fps=SCROLL_FPS, detect_every_frame=DETECT_EVERY_FRAME)
-
+    # 3) 스트리밍 생성 (long_img 없음)
+    _write_scroll_video_stream(tiles, per_tile_boxes_px, str(final_video_path), fps=SCROLL_FPS)
 
     if not final_video_path.exists() or final_video_path.stat().st_size == 0:
         raise IOError("최종 MP4 파일이 비어 있음")
 
-
-    # 4) Aggregate stats & DB updates
+    # 4) 통계 & DB
     all_dets = [d for dets in per_tile_dets for d in (dets or [])]
     avg_conf = round(sum(d.get("confidence", 0.0) for d in all_dets) / len(all_dets), 3) if all_dets else 0.0
-    labels = [d.get("ripeness", "분석불가") for d in all_dets]
+    labels   = [d.get("ripeness", "분석불가") for d in all_dets]
     final_ripeness = Counter(labels).most_common(1)[0][0] if labels else "분석불가"
     freshness = LABEL_SCORE.get(final_ripeness, 0.0)
 
-
-    # daily counters (best-effort)
     try:
-        # fabricate a lightweight frames_with_dets to reuse your existing bulk counter
         pseudo = [ (None, dets or []) for dets in per_tile_dets ]
         db2 = SessionLocal(); increment_daily_box_counts_bulk(db2, pseudo); db2.close()
     except Exception as e:
         print("[warn] increment_daily_box_counts_bulk (scroll) failed:", e)
 
-    del tiles, long_img, per_tile_dets
-    import gc; gc.collect()
-
-    # save analysis row
     db = SessionLocal()
     try:
         username = getattr(current_user, "nickname", None) or "unknown"
         db.add(Analysis(
-        username=username,
-        ripeness=final_ripeness,
-        confidence=avg_conf,
-        freshness=freshness,
-        video_path=f"/results/{final_video_path.name}",
-        video_blob=None,
-        created_at=datetime.now(timezone("Asia/Seoul")),
+            username=username,
+            ripeness=final_ripeness,
+            confidence=avg_conf,
+            freshness=freshness,
+            video_path=f"/results/{final_video_path.name}",
+            video_blob=None,
+            created_at=datetime.now(timezone("Asia/Seoul")),
         ))
         db.commit()
         update_daily_analysis_stat(db, datetime.now(timezone("Asia/Seoul")).date())
     finally:
         db.close()
 
-
-    # task success
     db = SessionLocal()
     try:
         set_task_db(db, task_id, status="SUCCESS", result=f"/results/{final_video_path.name}")
     finally:
         db.close()
+
+    # 🔻 메모리 정리
+    del tiles, per_tile_dets, per_tile_boxes_px
+    import gc; gc.collect()
 
 # --- 동영상 스트리밍 함수 ---
 @app.get("/results/{filename}")
