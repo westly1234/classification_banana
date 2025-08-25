@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
 from markupsafe import Markup
-from PIL import Image, ImageDraw, ImageFont, ImageFile
+from PIL import ImageFont, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True # 손상/부분 이미지도 최대한 로드
 from dotenv import load_dotenv
 load_dotenv()
@@ -60,10 +60,6 @@ def verify_password(plain_password, hashed):
 
 # --- 🗄️ DB 설정 ---
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-# 전역 설정(중복 없이 한 번만 정의)
-def _int(name, default): return int(os.getenv(name, str(default)))
-def _float(name, default): return float(os.getenv(name, str(default)))
 
 # --- 📦 Pydantic 모델 ---
 class UserCreate(BaseModel):
@@ -292,18 +288,10 @@ MAX_BYTES = int(os.getenv("MAX_BYTES", str(8*1024*1024)))    # 10MB/파일
 #  비디오 생성(멀티 이미지) 최적화 + 해상도 키우기
 INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
 VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
-SECONDS_PER_IMAGE = float(os.getenv("SECONDS_PER_IMAGE", "1.0"))
 
 # 감지 파라미터
-QUICK_IMGSZ = int(os.getenv("QUICK_IMGSZ", "512"))
-FINAL_IMGSZ = int(os.getenv("FINAL_IMGSZ", "640"))
-QUICK_CONF  = float(os.getenv("QUICK_CONF",  "0.25"))
 FINAL_CONF  = float(os.getenv("FINAL_CONF",  "0.10"))
 MAX_DET     = int(os.getenv("MAX_DET",      "3"))
-
-# 팬(스크롤) 느낌
-PAN_PX_PER_SEC = int(os.getenv("PAN_PX_PER_SEC", "120"))  # 초당 이동 픽셀
-HOLD_SEC_PER_IMG = float(os.getenv("HOLD_SEC_PER_IMG", "2.0"))  # 한 장당 최소 체류
 
 # --- YOLO 로드 ---
 MODEL_PATH = BASE_DIR / "best.pt"
@@ -312,6 +300,28 @@ MODEL_PATH = BASE_DIR / "best.pt"
 model = None
 MODEL_READY = False
 DB_READY = False
+
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
+
+# 스레드 수 강제
+try:
+    import cv2
+    cv2.setNumThreads(1)
+except Exception:
+    pass
+
+try:
+    import torch
+    torch.set_num_threads(1)      # PyTorch 내부 스레드
+    torch.set_num_interop_threads(1)
+except Exception:
+    pass
 
 # 3-2) 무거운 초기화 함수
 def _heavy_init():
@@ -722,7 +732,7 @@ def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
     return resized[y1:y1 + out_h, x1:x1 + out_w].copy()
 
 # ▼ Environment knobs
-SCROLL_FPS = int(os.getenv("SCROLL_FPS", "15"))
+SCROLL_FPS = int(os.getenv("SCROLL_FPS", "13"))
 SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6"))
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -744,40 +754,37 @@ def decode_and_cover(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
         raise ValueError("이미지 디코딩 실패")
     return resize_cover(img, dst_w, dst_h)
 
-def _tile_images_cover(img_paths: List[str], out_w: int, out_h: int) -> List[np.ndarray]:
-    tiles = []
-    for p in img_paths:
-        with open(p, "rb") as fp:
+def _iter_tiles_cover_from_manifest(manifest: List[Dict[str, str]], out_w: int, out_h: int):
+    """디스크에서 바로 1장씩 읽어서 cover-resize 후 yield. 메모리 O(1)."""
+    for m in manifest:
+        with open(m["path"], "rb") as fp:
             data = fp.read()
-        tiles.append(decode_and_cover(data, out_w, out_h))
-    return tiles
+        yield decode_and_cover(data, out_w, out_h)
 
 def _compose_frame_from_tiles(tile_left: np.ndarray, tile_right: np.ndarray, offset: int, view_w: int) -> np.ndarray:
     left_part  = tile_left[:, offset:view_w]
     right_part = tile_right[:, :offset] if offset > 0 else None
     return left_part.copy() if right_part is None or right_part.shape[1] == 0 else np.hstack([left_part, right_part])
 
-def _write_scroll_video_stream_raw(tiles: List[np.ndarray], out_path: str, fps: int) -> None:
+def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out_path: str, fps: int) -> None:
+    """타일 리스트 없이 인접 타일 2장만으로 스크롤 비디오 생성."""
     view_w, view_h = TARGET_W, TARGET_H
-    n = len(tiles)
-    if n == 0:
+    it = _iter_tiles_cover_from_manifest(manifest, view_w, view_h)
+    try:
+        left = next(it)
+    except StopIteration:
         raise ValueError("no tiles")
-    if n == 1:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        vw = cv2.VideoWriter(out_path, fourcc, fps, (view_w, view_h))
-        if not vw.isOpened(): raise RuntimeError("VideoWriter open failed")
-        for _ in range(max(1, int(round(SECONDS_PER_TILE * fps)))): vw.write(tiles[0])
-        vw.release(); return
 
+    # 인코더
     using_ffmpeg, proc, vw = False, None, None
     if shutil.which("ffmpeg"):
         cmd = ["ffmpeg","-y","-loglevel","error","-f","rawvideo","-pix_fmt","bgr24",
                "-s", f"{view_w}x{view_h}","-r", str(fps), "-i","-",
-               "-c:v","libx264","-preset","ultrafast","-crf","28",
-               "-threads","1" if (os.cpu_count() or 2) <= 2 else "2",
-               "-max_muxing_queue_size","64","-bufsize","2M",
+               "-c:v","libx264","-preset","ultrafast","-crf","30",
+               "-threads","1","-max_muxing_queue_size","64","-bufsize","2M",
                "-pix_fmt","yuv420p","-movflags","+faststart", out_path]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if proc.stdin is None: raise RuntimeError("failed to open ffmpeg stdin")
         using_ffmpeg = True
     else:
@@ -789,14 +796,22 @@ def _write_scroll_video_stream_raw(tiles: List[np.ndarray], out_path: str, fps: 
     step = max(1, view_w // frames_per_tile)
 
     try:
-        for idx in range(n - 1):
-            left, right = tiles[idx], tiles[idx + 1]
+        wrote_any = False
+        for right in it:
             for off in range(0, view_w, step):
                 frame = _compose_frame_from_tiles(left, right, off, view_w)
-                (proc.stdin.write if using_ffmpeg else vw.write)(frame if using_ffmpeg else frame)
+                if using_ffmpeg: proc.stdin.write(frame.tobytes())
+                else:            vw.write(frame)
+                wrote_any = True
+            # 다음 경계로 이동
+            left = right
+            # 스트리밍이므로 참조 해제
+            del right, frame
+        # 마지막 타일 hold
         for _ in range(frames_per_tile):
-            frame = tiles[-1].copy()
-            (proc.stdin.write if using_ffmpeg else vw.write)(frame if using_ffmpeg else frame)
+            if using_ffmpeg: proc.stdin.write(left.tobytes())
+            else:            vw.write(left)
+        wrote_any = True
     finally:
         if using_ffmpeg:
             try: proc.stdin.close()
@@ -804,32 +819,65 @@ def _write_scroll_video_stream_raw(tiles: List[np.ndarray], out_path: str, fps: 
             proc.wait(timeout=30)
         else:
             vw.release()
+        del left
+        import gc; gc.collect()
+
+FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "1")) 
 
 def detect_video_and_write(input_path: str, output_path: str) -> None:
     cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened(): raise RuntimeError("cannot open input video")
+    if not cap.isOpened():
+        raise RuntimeError("cannot open input video")
+
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps    = cap.get(cv2.CAP_PROP_FPS) or SCROLL_FPS
+
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    if not out.isOpened(): cap.release(); raise RuntimeError("cannot open output video")
+    if not out.isOpened():
+        cap.release()
+        raise RuntimeError("cannot open output video")
+
+    import gc
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret: break
-            results = model(frame)
-            out.write(results[0].plot())
+        import torch
+        inf_ctx = torch.inference_mode  # no_grad + 일부 최적화
+    except Exception:
+        from contextlib import nullcontext
+        inf_ctx = nullcontext  # torch 미사용 환경 대비
+
+    i = 0
+    try:
+        with inf_ctx():
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                if FRAME_STRIDE == 1 or (i % FRAME_STRIDE) == 0:
+                    # 프레임 탐지
+                    results = model(frame)        # verbose=False 옵션 가능
+                    annotated = results[0].plot() # BGR uint8
+                    del results
+                    out.write(annotated)
+                else:
+                    # 스킵 프레임은 원본 그대로 쓰기
+                    out.write(frame)
+
+                if (i & 31) == 0:
+                    gc.collect()  # 주기적 메모리 수거
+                i += 1
     finally:
-        cap.release(); out.release()
+        cap.release()
+        out.release()
 
 def create_scroll_then_detect_video(current_user, task_id: str, manifest: List[Dict[str, str]]) -> None:
     view_w, view_h = TARGET_W, TARGET_H
     raw_video_path   = RESULTS_DIR / f"{task_id}_raw.mp4"
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
 
-    tiles = _tile_images_cover([m["path"] for m in manifest], view_w, view_h)
-    _write_scroll_video_stream_raw(tiles, str(raw_video_path), fps=SCROLL_FPS)
+    _write_scroll_video_stream_raw_streaming(manifest, str(raw_video_path), fps=SCROLL_FPS)
     if not raw_video_path.exists() or raw_video_path.stat().st_size == 0: raise IOError("raw scroll video empty")
 
     detect_video_and_write(str(raw_video_path), str(final_video_path))
@@ -1293,6 +1341,7 @@ def get_settings():
         "MAX_BYTES": _int("MAX_BYTES", 8*1024*1024),
         "VIDEO_FPS": VIDEO_FPS,          # ← 변수 사용
         "INFER_EVERY_N_FRAMES": _int("INFER_EVERY_N_FRAMES", 10),
+        "FRAME_STRIDE": FRAME_STRIDE,
     }
 
 
