@@ -271,10 +271,6 @@ EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1 if CPU_CORES <= 2 else 2
 )
 
-# --- 고성능 옵션 ---
-USE_ONNX = os.getenv("USE_ONNX", "1") == "1"        # 기본: ONNX 사용(있으면)
-MODEL_ONNX = (BASE_DIR / "best.onnx")               # 없으면 PyTorch로 폴백
-
 # 배치 추론(파일 여러 장 한 번에). CPU 1~2코어면 2, 4코어면 4 권장
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "2"))
 
@@ -318,6 +314,8 @@ DB_READY = False
 # 3-2) 무거운 초기화 함수
 def _heavy_init():
     global model, MODEL_READY, DB_READY
+
+    # ── 0) DB 준비
     try:
         init_db()
         DB_READY = True
@@ -325,46 +323,78 @@ def _heavy_init():
     except Exception as e:
         print("❌ DB init failed:", e)
 
+    # ── 1) CPU 환경 튜닝(선택) : 스레드 수/BLAS 제한으로 안정성+속도 균형
     try:
-        if USE_ONNX and MODEL_ONNX.exists():
-            print(f"🔃 Loading ONNX: {MODEL_ONNX}")
-            # 👇 ONNX는 task 명시 + .to() 금지
-            m = YOLO(str(MODEL_ONNX), task="detect")
-            is_pt = False
-        else:
-            print(f"🔃 Loading PyTorch: {MODEL_PATH}")
-            m = YOLO(MODEL_PATH)  # pt
-            try:
-                m.fuse()  # CPU에서 약간 도움
-            except Exception:
-                pass
-            m.to('cpu')           # 👈 PyTorch에서만 허용
-            is_pt = True
+        # 기본값 과하면 컨테이너에서 문맥 전환 오버헤드 ↑
+        cpu_cores = os.cpu_count() or 2
+        omp_threads = int(os.getenv("OMP_NUM_THREADS", str(min(4, cpu_cores))))
+        mkl_threads = int(os.getenv("MKL_NUM_THREADS", str(min(4, cpu_cores))))
+        os.environ.setdefault("OMP_NUM_THREADS", str(omp_threads))
+        os.environ.setdefault("MKL_NUM_THREADS", str(mkl_threads))
 
-        # 공통 override (OK)
+        # OpenCV 스레드 제한
+        try:
+            import cv2
+            cv2.setNumThreads(omp_threads)
+        except Exception:
+            pass
+
+        # PyTorch 스레드 제한
+        try:
+            import torch
+            torch.set_num_threads(omp_threads)
+            torch.set_num_interop_threads(max(1, omp_threads // 2))
+        except Exception:
+            pass
+
+        print(f"🧠 Threads -> OMP:{os.environ.get('OMP_NUM_THREADS')} MKL:{os.environ.get('MKL_NUM_THREADS')}")
+    except Exception as e:
+        print("⚠️ thread/env tuning skipped:", e)
+
+    # ── 2) YOLO (PyTorch .pt) 로드: CPU 고정
+    try:
+        print(f"🔃 Loading PyTorch (CPU): {MODEL_PATH}")
+        m = YOLO(MODEL_PATH)  # .pt
+
+        # 약간의 CPU 최적화
+        try:
+            m.fuse()  # 일부 모델에서 Conv+BN fusion
+        except Exception:
+            pass
+
+        # CPU 고정 (Render 무료 플랜)
+        try:
+            m.to("cpu")
+        except Exception:
+            pass
+
+        # 공통 파라미터
         m.overrides.update({
             "conf": FINAL_CONF,
-            "imgsz": (MODEL_W, MODEL_H,), # (H, W) 순서 주의
+            "imgsz": (MODEL_W, MODEL_H),   # (W,H) 헷갈리지 않게 고정
             "max_det": MAX_DET,
             "agnostic_nms": True,
-            "workers": 0,
+            "workers": 0,                  # DataLoader 안 씀
             "stream_buffer": False
         })
 
         globals()["model"] = m
         MODEL_READY = True
-        print("✅ YOLO loaded:", "PyTorch" if is_pt else "ONNX")
+        print("✅ YOLO loaded: PyTorch (CPU)")
     except Exception as e:
         print("❌ YOLO load failed:", e)
 
+    # ── 3) 일일 통계 초기 업데이트 (best-effort)
     try:
         db = SessionLocal()
         update_daily_analysis_stat(db, datetime.now(KST).date())
     except Exception as e:
         print("❌ update_daily_analysis_stat at startup:", e)
     finally:
-        try: db.close()
-        except: pass
+        try:
+            db.close()
+        except:
+            pass
 
 # 3-3) 스타트업에서 비동기 시작
 @app.on_event("startup")
@@ -781,7 +811,7 @@ def write_video(frames_with_dets, out_path, fps=VIDEO_FPS, hold_sec=HOLD_SEC):
             "ffmpeg","-y","-loglevel","error",
             "-f","rawvideo","-pix_fmt","bgr24",
             "-s", f"{out_w}x{out_h}","-r", str(fps), "-i","-",
-            "-c:v","libx264","-preset","veryfast","-crf","23",
+            "-c:v","libx264","-preset","veryfast","-crf","28",
             "-threads","1" if CPU_CORES <= 2 else "2",
             "-max_muxing_queue_size","64",     # 🔻 내부 큐 크기 축소
             "-bufsize","2M",                   # 🔻 파이프 버퍼 힌트 감소
@@ -890,8 +920,9 @@ def create_analysis_video(
 # ▼ Environment knobs
 SCROLL_MODE = os.getenv("SCROLL_MODE", "1") == "1" # enable new scroll pipeline
 SCROLL_FPS = int(os.getenv("SCROLL_FPS", str(VIDEO_FPS))) # default = existing VIDEO_FPS
-SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.2")) # time a single tile stays on screen while panning
+SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "0.8")) # time a single tile stays on screen while panning
 DETECT_EVERY_FRAME = os.getenv("DETECT_EVERY_FRAME", "0") == "1" # turn on if you want frame-by-frame YOLO (slower)
+SHOW_LABELS = os.getenv("SHOW_LABELS", "1") == "1"
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers for the scroll video pipeline
@@ -961,32 +992,32 @@ def _draw_overlay_px(frame_bgr: np.ndarray, boxes_px: List[dict]) -> None:
     for b in boxes_px:
         cv2.rectangle(frame_bgr, (b["x1"], b["y1"]), (b["x2"], b["y2"]), (0, 255, 255), thickness)
 
-    # 2) Labels via PIL (Korean font-safe)
-    img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
-    draw = ImageDraw.Draw(img)
-    font = _get_font(22)
+    if SHOW_LABELS:
+        # 2) Labels via PIL (Korean font-safe)
+        img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+        draw = ImageDraw.Draw(img)
+        font = _get_font(22)
+
+        for b in boxes_px:
+            label = f"{b.get('ripeness','')} {b.get('confidence',0.0)*100:.1f}%"
+            l, t, r, btm = draw.textbbox((0, 0), label, font=font)
+            tw, th = (r - l), (btm - t)
+            pad = 6
+            box_w, box_h = tw + pad * 2, th + pad * 2
+            x = max(0, min(w - box_w, b["x1"]))
+            # prefer above box if room else below else bottom align
+            if b["y1"] - box_h - 2 >= 0:
+                y = b["y1"] - box_h - 2
+            elif b["y2"] + 2 + box_h <= h:
+                y = b["y2"] + 2
+            else:
+                y = max(0, h - box_h)
+            bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
+            img.paste(bg, (x, y), bg)
+            draw.text((x + pad, y + pad), label, font=font, fill=(255, 255, 255, 255))
 
 
-    for b in boxes_px:
-        label = f"{b.get('ripeness','')} {b.get('confidence',0.0)*100:.1f}%"
-        l, t, r, btm = draw.textbbox((0, 0), label, font=font)
-        tw, th = (r - l), (btm - t)
-        pad = 6
-        box_w, box_h = tw + pad * 2, th + pad * 2
-        x = max(0, min(w - box_w, b["x1"]))
-        # prefer above box if room else below else bottom align
-        if b["y1"] - box_h - 2 >= 0:
-            y = b["y1"] - box_h - 2
-        elif b["y2"] + 2 + box_h <= h:
-            y = b["y2"] + 2
-        else:
-            y = max(0, h - box_h)
-        bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
-        img.paste(bg, (x, y), bg)
-        draw.text((x + pad, y + pad), label, font=font, fill=(255, 255, 255, 255))
-
-
-    frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+        frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
 def _visible_boxes_in_window(long_boxes: List[dict], dx: int, view_w: int, view_h: int) -> List[dict]:
     """Clip absolute long-image boxes to the current [dx, dx+view_w) view window."""
@@ -1080,6 +1111,8 @@ def _write_scroll_video(long_img: np.ndarray,
                 proc.stdin.write(canvas.tobytes())
             else:
                 vw.write(canvas)
+        del long_boxes_px
+
     finally:
         if using_ffmpeg:
             try: proc.stdin.close()
@@ -1116,7 +1149,7 @@ def create_scroll_analysis_video(current_user, task_id: str, manifest: List[Dict
             name_to_result[m["filename"]] = {"filename": m["filename"], "detections": dets, "avg_confidence": avg_conf}
 
 
-    per_tile_dets = [ (name_to_result[m["filename"]]["detections"]) for m in manifest ]
+    per_tile_dets = [ (name_to_result.get(m["filename"], {}).get("detections", [])) for m in manifest ]
     long_img = _hstack_no_padding(tiles, view_h)
 
 
@@ -1148,6 +1181,8 @@ def create_scroll_analysis_video(current_user, task_id: str, manifest: List[Dict
     except Exception as e:
         print("[warn] increment_daily_box_counts_bulk (scroll) failed:", e)
 
+    del tiles, long_img, per_tile_dets
+    import gc; gc.collect()
 
     # save analysis row
     db = SessionLocal()
@@ -1347,10 +1382,19 @@ async def start_video_analysis(
 
                 for fname, dets in zip(batch_names, det_lists):
                     avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
-                    name_to_result[fname] = {"filename": fname, "detections": dets, "avg_confidence": avg_conf}
+                    name_to_result[fname] = {"filename": fname, "detections": dets, "avg_confidence": avg_conf, "processed": True,}
 
                 with SessionLocal() as db:
-                    sorted_results = [name_to_result[m["filename"]] for m in manifest]
+                    sorted_results = []
+                    for m in manifest:
+                        r = name_to_result.get(m["filename"], {})
+                        sorted_results.append({
+                            "filename": m["filename"],
+                            "detections": r.get("detections", []),
+                            "avg_confidence": r.get("avg_confidence", 0.0),
+                            "processed": bool(r.get("processed", False)),
+                            "error": r.get("error")  # 있으면 포함
+                        })
                     set_task_db(db, task_id, status="PROCESSING", image_results=sorted_results)
                 del batch_imgs, det_lists
                 import gc; gc.collect()
