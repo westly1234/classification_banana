@@ -342,6 +342,23 @@ def _get_font(size: int = 24):
             _font_cache[size] = ImageFont.load_default()  # (한글 미지원일 수 있음)
     return _font_cache[size]
 
+# 원본(영문) 라벨 테이블 보관
+MODEL_NAMES_EN_BY_ID = None
+
+def id_to_en(k: int) -> str:
+    nm = globals().get("MODEL_NAMES_EN_BY_ID") or {}
+    try:
+        if isinstance(nm, dict):
+            return str(nm.get(int(k), str(k)))
+        else:
+            return str(nm[int(k)])
+    except Exception:
+        return str(k)
+
+def id_to_kor(k: int) -> str:
+    en = id_to_en(k)
+    return KOREAN_CLASSES.get(en, en)
+
 # --- YOLO 로드 ---
 MODEL_PATH = BASE_DIR / "best.pt"
 
@@ -417,14 +434,16 @@ def _heavy_init():
         print(f"🔃 Loading PyTorch (CPU): {MODEL_PATH}")
         m = YOLO(MODEL_PATH)  # .pt
 
-        try:
-            nm = getattr(m, "names", {})
-            if isinstance(nm, dict):
-                m.names = {i: KOREAN_CLASSES.get(v, v) for i, v in nm.items()}
-            elif isinstance(nm, (list, tuple)):
-                m.names = [KOREAN_CLASSES.get(v, v) for v in nm]
-        except Exception as e:
-            print("names localization skip:", e)
+        # 1) 원본 영문 라벨 표 저장
+        nm = getattr(m, "names", {})
+        if isinstance(nm, dict):
+            LABELS_EN = {int(i): str(v) for i, v in nm.items()}
+        else:
+            LABELS_EN = {i: str(v) for i, v in enumerate(list(nm))}
+        globals()["MODEL_NAMES_EN_BY_ID"] = LABELS_EN
+
+        # 2) 표시용 한글 라벨로 덮어쓰기 (Ultralytics 내부 annotate 대비)
+        m.names = {i: KOREAN_CLASSES.get(v, v) for i, v in LABELS_EN.items()}
 
         # 약간의 CPU 최적화
         try:
@@ -528,27 +547,23 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
     if not imgs:
         return [] if single_input else []
 
-    if isinstance(imgsz, (list, tuple)) and len(imgsz) == 2:
-        sz = tuple(imgsz)
-    else:
-        sz = (MODEL_W, MODEL_H,)
+    sz = tuple(imgsz) if (isinstance(imgsz, (list, tuple)) and len(imgsz) == 2) else (MODEL_W, MODEL_H,)
     res_list = model(imgs, imgsz=sz, conf=(conf or 0.1),
                      max_det=(max_det or 100), device='cpu', verbose=False)
 
-    VALID = {"ripe","unripe","freshripe","freshunripe","overripe","rotten"}
+    VALID_EN = {"ripe","unripe","freshripe","freshunripe","overripe","rotten"}
     outputs = []
 
     for img_bgr, res in zip(imgs, res_list):
         h, w = img_bgr.shape[:2]
         dets = []
         for box in (res.boxes or []):
-            cls = model.names[int(box.cls.item())]
-            if cls not in VALID:
+            k_id = int(box.cls.item())
+            en = id_to_en(k_id)  # ← 영문
+            if en not in VALID_EN:
                 continue
 
-            # xyxy → 정규화(0~1). 음수/초과 값 보정
             x1, y1, x2, y2 = box.xyxy[0].tolist()
-            # 음수/초과 보정 (모델/리사이즈 경계 오차)
             x1 = max(0.0, min(w - 1.0, x1))
             y1 = max(0.0, min(h - 1.0, y1))
             x2 = max(0.0, min(w - 1.0, x2))
@@ -556,20 +571,16 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
             if x2 <= x1: x2 = min(w - 1.0, x1 + 1.0)
             if y2 <= y1: y2 = min(h - 1.0, y1 + 1.0)
 
-            nx = x1 / w
-            ny = y1 / h
-            nw = (x2 - x1) / w
-            nh = (y2 - y1) / h
-
-            # 우/하단 미세 넘침 보정(부동소수점 안전 마진)
+            nx = x1 / w; ny = y1 / h
+            nw = (x2 - x1) / w; nh = (y2 - y1) / h
             eps = 1e-4
             if nx + nw > 1.0: nw = max(0.0, 1.0 - nx - eps)
             if ny + nh > 1.0: nh = max(0.0, 1.0 - ny - eps)
 
             dets.append({
-                "ripeness": KOREAN_CLASSES.get(cls, cls),
+                "ripeness": id_to_kor(k_id),                     # ← 한글
                 "confidence": float(box.conf.item()),
-                "freshness": round(FRESHNESS_MAP.get(cls, 0.0), 3),
+                "freshness": round(FRESHNESS_MAP.get(en, 0.0), 3),  # ← 영문 키로 매핑
                 "boundingBox": {
                     "x": round(nx, 4), "y": round(ny, 4),
                     "width": round(nw, 4), "height": round(nh, 4),
@@ -927,6 +938,8 @@ def _compose_frame_from_tiles(tile_left: np.ndarray, tile_right: np.ndarray, off
     right_part = tile_right[:, :offset] if offset > 0 else None
     return left_part.copy() if right_part is None or right_part.shape[1] == 0 else np.hstack([left_part, right_part])
 
+TAIL_HOLD_FRAMES = int(os.getenv("TAIL_HOLD_FRAMES", "0"))
+
 def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out_path: str, fps: int) -> None:
     """타일 리스트 없이 인접 타일 2장만으로 스크롤 비디오 생성."""
     view_w, view_h = TARGET_W, TARGET_H
@@ -969,7 +982,8 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
             # 스트리밍이므로 참조 해제
             del right, frame
         # 마지막 타일 hold
-        for _ in range(frames_per_tile):
+        hold = max(0, int(TAIL_HOLD_FRAMES))
+        for _ in range(hold):
             if using_ffmpeg: proc.stdin.write(left.tobytes())
             else:            vw.write(left)
         wrote_any = True
@@ -1055,7 +1069,7 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
                                         "x": float(x1*inv_w), "y": float(y1*inv_h),
                                         "width": float((x2-x1)*inv_w), "height": float((y2-y1)*inv_h),
                                     },
-                                    "ripeness": str(names.get(int(k), str(k))),
+                                    "ripeness": id_to_kor(int(k)),
                                     "confidence": float(c),
                                 })
                     last_dets, last_det_i = dets, i
