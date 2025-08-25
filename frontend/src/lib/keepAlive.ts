@@ -33,12 +33,12 @@ export function startKeepAlive(baseIntervalMs = 180_000) {
     inFlight = true;
     try {
       // 가벼운 HEAD 핑 (FastAPI는 기본적으로 HEAD를 GET 처리로 지원)
-      await api.head("/ping", { params: { t: Date.now() } });
+      await api.head("/healthz", { params: { t: Date.now() } });
       backoff = 0;
     } catch {
       try {
       // 폴백: GET
-      await api.get("/ping", { params: { t: Date.now() } });
+      await api.get("/healthz", { params: { t: Date.now() } });
       backoff = 0;
     } catch {
       backoff += 1; // 실패 누적 → 백오프 증가

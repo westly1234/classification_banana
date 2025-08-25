@@ -113,7 +113,6 @@ export default function Analyze() {
   const [imgOverlay, setImgOverlay] = useState<{
     offX: number; offY: number; drawW: number; drawH: number;
   } | null>(null);
-  const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
   // ✅ 컴포넌트 스코프에 선언 (JSX에서도 사용 가능)
   const calcOverlay = useCallback(() => {
@@ -478,7 +477,7 @@ export default function Analyze() {
                      bg-amber-50 text-amber-700 border border-amber-300
                      rounded-full px-4 py-2 shadow"
         >
-          분석/동영상 생성 중입니다. 새로고침이나 탭 이동을 피해주세요.
+          이미지  분석/동영상 생성 중입니다. 새로고침이나 탭 이동을 피해주세요.
         </div>
       )}
       <main className="flex-grow grid grid-cols-1 lg:grid-cols-12 gap-6 p-4 sm:p-6">
@@ -549,22 +548,43 @@ export default function Analyze() {
                         height: imgOverlay.drawH,
                       }}
                     >
-                  {selected.result.map((det, i) => {
-                    const b = det.boundingBox;
-                    const nx = clamp01(b.x);
-                    const ny = clamp01(b.y);
-                    const nw = Math.max(0, Math.min(1 - nx, b.width));
-                    const nh = Math.max(0, Math.min(1 - ny, b.height));
-                    const x = nx * imgOverlay.drawW;
-                    const y = ny * imgOverlay.drawH;
-                    const w = nw * imgOverlay.drawW;
-                    const h = nh * imgOverlay.drawH;
+                  {selected.result.map((det: any, i: number) => {
+                    const { drawW, drawH } = imgOverlay;
+
+                    // 1) 정규화 박스 보정(0~1 범위, 우/하단 넘침 방지)
+                    const b = det.boundingBox ?? {};
+                    const nx = Math.max(0, Math.min(1, Number(b.x) || 0));
+                    const ny = Math.max(0, Math.min(1, Number(b.y) || 0));
+                    const nw = Math.max(0, Math.min(1 - nx, Number(b.width) || 0));
+                    const nh = Math.max(0, Math.min(1 - ny, Number(b.height) || 0));
+
+                    // 2) 픽셀로 변환
+                    let x1 = nx * drawW;
+                    let y1 = ny * drawH;
+                    let x2 = (nx + nw) * drawW;
+                    let y2 = (ny + nh) * drawH;
+
+                    // 3) 오버레이 경계로 한 번 더 클립 (라운딩/경계 오차 대비)
+                    x1 = Math.max(0, Math.min(drawW - 1, x1));
+                    y1 = Math.max(0, Math.min(drawH - 1, y1));
+                    x2 = Math.max(x1 + 1, Math.min(drawW, x2));
+                    y2 = Math.max(y1 + 1, Math.min(drawH, y2));
+
+                    const x = Math.round(x1);
+                    const y = Math.round(y1);
+                    const w = Math.round(x2 - x1);
+                    const h = Math.round(y2 - y1);
+
                     const LABEL_H = 18;
+
+                    // 4) 라벨은 "박스 내부 좌표"로 배치
+                    //    박스 위에 공간 있으면 위(-LABEL_H), 없으면 박스 안(0)
+                    const labelTop = y - LABEL_H >= 0 ? -LABEL_H : 0;
                     return (
-                      <div key={i} style={{ position:'absolute', left:x, top:y, width:w, height:h, border:'3px solid #FACC15', borderRadius:2 }}>
+                      <div key={i} style={{ position:'absolute', left:x, top:y, width:w, height:h, border:'3px solid #FACC15', borderRadius:2, boxSizing: "border-box", }}>
                         <div
                           className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
-                          style={{ left: 0, top: Math.max(0, y - LABEL_H < 0 ? 0 : -LABEL_H) }} // 박스 위에 붙이고 화면 위로는 못 나가게
+                          style={{ left: 0, top: labelTop, maxWidth: "100%", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", }} // 박스 위에 붙이고 화면 위로는 못 나가게
                         >
                           {det.ripeness} {(det.confidence * 100).toFixed(1)}%
                         </div>

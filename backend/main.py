@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
 from markupsafe import Markup
-from PIL import ImageFont, ImageFile
+from io import BytesIO
+from PIL import Image, ImageOps, ImageFont, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True # 손상/부분 이미지도 최대한 로드
 from dotenv import load_dotenv
 load_dotenv()
@@ -413,10 +414,14 @@ def _heavy_init():
 def startup():
     threading.Thread(target=_heavy_init, daemon=True).start()
 
-# 3-4) 헬스체크는 즉시 200
+# 3-4) 핑 체크 (상태 정보 포함)
 @app.get("/ping")
 def ping():
     return {"ok": True, "model": MODEL_READY, "db": DB_READY}
+
+@app.head("/ping", include_in_schema=False)
+def ping_head():
+    return Response(status_code=200, headers={"Cache-Control": "no-store"})
 
 # 3-5) 헬스체크
 @app.get("/healthz", include_in_schema=False)
@@ -734,12 +739,31 @@ def update_daily_analysis_stat(db: Session, target_date: date):
     db.commit() 
 
 # --- 📹 비동기 작업 및 동영상 생성 ---
+def decode_bgr(img_bytes: bytes) -> np.ndarray:
+    """
+    JPEG EXIF Orientation을 반영해서 올바른 방향의 BGR ndarray로 반환.
+    브라우저가 보여주는 방향과 서버가 계산하는 방향을 일치시킵니다.
+    """
+    try:
+        pil = Image.open(BytesIO(img_bytes))
+        pil = ImageOps.exif_transpose(pil)     # ★ 방향 교정
+        pil = pil.convert("RGB")               # 보장
+        arr = np.array(pil)[:, :, ::-1].copy() # RGB->BGR
+        return arr
+    except Exception:
+        # 폴백: cv2.imdecode (EXIF 무시하지만, 최후의 안전망)
+        arr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("이미지 디코딩 실패")
+        return img
+
 def decode_and_cover(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
-    arr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("이미지 디코딩 실패")
-    return resize_cover(img, dst_w, dst_h) 
+    """
+    EXIF 교정된 BGR로 디코드 → 여백 없이 cover 크롭.
+    """
+    img = decode_bgr(img_bytes)                # ★ 방향 먼저 맞추고
+    return resize_cover(img, dst_w, dst_h)     # 그다음 cover로 자르기
 
 # --- 여백 없이 정사이즈로 맞추기(cover)
 def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
@@ -947,13 +971,6 @@ def get_result_file(filename: str):
     )
 
 # --- 분석 라우터 (모든 API에 인증 필요) ---
-def decode_bgr(img_bytes: bytes) -> np.ndarray:
-    arr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("이미지 디코딩 실패")
-    return img
-
 @analysis_router.post("/analyze")
 async def analyze_single_image(payload: ImagePayload, current_user: User = Depends(get_current_user)):
     if not MODEL_READY or model is None:
