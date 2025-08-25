@@ -36,13 +36,18 @@ export function startKeepAlive(baseIntervalMs = 180_000) {
       await api.head("/ping", { params: { t: Date.now() } });
       backoff = 0;
     } catch {
-      // 실패 시 백오프 증가
-      backoff += 1;
-    } finally {
-      inFlight = false;
-      schedule();
+      try {
+      // 폴백: GET
+      await api.get("/ping", { params: { t: Date.now() } });
+      backoff = 0;
+    } catch {
+      backoff += 1; // 실패 누적 → 백오프 증가
     }
-  };
+  } finally {
+    inFlight = false;
+    schedule();
+  }
+};
 
   const schedule = () => {
     if (stopped) return;

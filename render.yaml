@@ -12,7 +12,7 @@ services:
     plan: free
     rootDir: backend
     dockerfilePath: Dockerfile
-    healthCheckPath: /ping
+    healthCheckPath: /healthz
     envVars:
       - key: DATABASE_URL
         fromDatabase:

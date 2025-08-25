@@ -15,10 +15,10 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # FastAPI 및 관련 라이브러리
-from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import List, Tuple, Dict
 
@@ -417,6 +417,28 @@ def startup():
 @app.get("/ping")
 def ping():
     return {"ok": True, "model": MODEL_READY, "db": DB_READY}
+
+# 3-5) 헬스체크
+@app.get("/healthz", include_in_schema=False)
+def healthz_get():
+    return PlainTextResponse("ok", headers={"Cache-Control": "no-store"})
+
+@app.head("/healthz", include_in_schema=False)
+def healthz_head():
+    return Response(status_code=200, headers={"Cache-Control": "no-store"})
+
+# Access 로그 필터링
+import logging
+logger = logging.getLogger("uvicorn.access")
+
+class SkipHealthz(logging.Filter):
+    def filter(self, record):
+        try:
+            return '"/healthz' not in record.getMessage()
+        except Exception:
+            return True
+
+logger.addFilter(SkipHealthz())
 
 KOREAN_CLASSES = {
     "freshripe": "신선한 완숙",
