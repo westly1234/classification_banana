@@ -771,7 +771,7 @@ def make_long_strip(frames_with_dets: List[Tuple[np.ndarray, list]], out_w: int,
 
     return np.hstack(tiles) if tiles else np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
-def write_video(frames_with_dets, out_path, fps=VIDEO_FPS, hold_sec=SECONDS_PER_IMAGE):
+def write_video(frames_with_dets, out_path, fps=VIDEO_FPS, hold_sec=HOLD_SEC):
     out_w, out_h = TARGET_W, TARGET_H
 
     # ffmpeg 파이프 준비 (없으면 OpenCV)
@@ -1048,8 +1048,8 @@ def _write_scroll_video(long_img: np.ndarray,
     else:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         vw = cv2.VideoWriter(out_path, fourcc, fps, (view_w, view_h))
-    if not vw.isOpened():
-        raise RuntimeError("VideoWriter open failed")
+        if not vw.isOpened():
+            raise RuntimeError("VideoWriter open failed")
 
 
     try:
