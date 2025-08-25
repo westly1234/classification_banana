@@ -789,14 +789,90 @@ SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6"))
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers for the scroll video pipeline
 # ────────────────────────────────────────────────────────────────────────────────
-def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
-    h, w = img_bgr.shape[:2]
-    scale = max(out_w / w, out_h / h)
-    nw, nh = int(round(w * scale)), int(round(h * scale))
-    resized = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    x1 = max(0, (nw - out_w) // 2)
-    y1 = max(0, (nh - out_h) // 2)
-    return resized[y1:y1 + out_h, x1:x1 + out_w].copy()
+
+# 최소한의 오버레이(박스/라벨) 함수 — 한글 폰트, 경계 클램프 포함
+def draw_overlay(frame_bgr, detections, w=None, h=None):
+    if not detections:
+        return
+    import cv2, numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+
+    # 프레임 크기
+    if w is None or h is None:
+        h, w = frame_bgr.shape[:2]
+
+    # 선 두께
+    thickness = max(2, min(6, (w + h) // 400))
+
+    # 1) OpenCV 박스 (정규화 → 픽셀 + 클램프)
+    for d in detections:
+        bb = d.get("boundingBox") or {}
+        nx = max(0.0, min(1.0, float(bb.get("x", 0.0))))
+        ny = max(0.0, min(1.0, float(bb.get("y", 0.0))))
+        nw = max(0.0, min(1.0 - nx, float(bb.get("width", 0.0))))
+        nh = max(0.0, min(1.0 - ny, float(bb.get("height", 0.0))))
+
+        x1 = int(round(nx * w))
+        y1 = int(round(ny * h))
+        x2 = int(round((nx + nw) * w))
+        y2 = int(round((ny + nh) * h))
+
+        # 프레임 경계 내로 강제
+        x1 = max(0, min(w - 2, x1))
+        y1 = max(0, min(h - 2, y1))
+        x2 = max(x1 + 1, min(w - 1, x2))
+        y2 = max(y1 + 1, min(h - 1, y2))
+
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), thickness)
+
+    # 2) PIL 라벨 (한글 폰트)
+    if not globals().get("SHOW_LABELS", True):
+        return
+
+    img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    draw = ImageDraw.Draw(img)
+
+    # _get_font가 있다면 사용, 없으면 안전 폴백
+    try:
+        font = _get_font(22)  # 프로젝트에 이미 있는 함수
+    except Exception:
+        try:
+            font = ImageFont.truetype("NanumGothic.ttf", size=22)
+        except Exception:
+            font = ImageFont.load_default()  # 한글 미지원일 수 있음
+
+    for d in detections:
+        bb = d.get("boundingBox") or {}
+        nx = max(0.0, min(1.0, float(bb.get("x", 0.0))))
+        ny = max(0.0, min(1.0, float(bb.get("y", 0.0))))
+        x1 = int(round(nx * w))
+        y1 = int(round(ny * h))
+
+        label = f"{d.get('ripeness','')} {float(d.get('confidence',0.0))*100:.1f}%".strip()
+        if not label:
+            continue
+
+        l, t, r, btm = draw.textbbox((0, 0), label, font=font)
+        tw, th = (r - l), (btm - t)
+        pad = 6
+        box_w, box_h = tw + pad * 2, th + pad * 2
+
+        # X는 프레임 안
+        x = max(0, min(w - box_w, x1))
+
+        # Y는 위에 자리 있으면 위, 없으면 박스 안, 그것도 안 되면 하단
+        if y1 - box_h - 2 >= 0:
+            y = y1 - box_h - 2
+        elif y1 + 2 + box_h <= h:
+            y = y1 + 2
+        else:
+            y = max(0, h - box_h)
+
+        bg = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 210))
+        img.paste(bg, (x, y), bg)
+        draw.text((x + pad, y + pad), label, font=font, fill=(255, 255, 255, 255))
+
+    frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
 def decode_and_cover(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
     arr = np.frombuffer(img_bytes, np.uint8)
@@ -890,34 +966,52 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
         cap.release()
         raise RuntimeError("cannot open output video")
 
-    import gc
-    try:
-        import torch
-        inf_ctx = torch.inference_mode  # no_grad + 일부 최적화
-    except Exception:
-        from contextlib import nullcontext
-        inf_ctx = nullcontext  # torch 미사용 환경 대비
+    # 클래스 이름 (Ultralytics 모델이 들고 있음)
+    names = getattr(model, "names", {}) or {}
 
-    i = 0
     try:
-        with inf_ctx():
+        i = 0
+        import torch, gc
+        with torch.inference_mode():
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-                if FRAME_STRIDE == 1 or (i % FRAME_STRIDE) == 0:
-                    # 프레임 탐지
-                    results = model(frame)        # verbose=False 옵션 가능
-                    annotated = results[0].plot() # BGR uint8
-                    del results
-                    out.write(annotated)
-                else:
-                    # 스킵 프레임은 원본 그대로 쓰기
-                    out.write(frame)
+                # 필요 시 프레임 스트라이드 적용
+                run_detect = (i % FRAME_STRIDE == 0)
 
-                if (i & 31) == 0:
-                    gc.collect()  # 주기적 메모리 수거
+                if run_detect:
+                    results = model(frame, verbose=False)
+                    dets = []
+                    if results and len(results) > 0:
+                        r = results[0]
+                        boxes = getattr(r, "boxes", None)
+                        if boxes is not None and boxes.xyxy is not None:
+                            xyxy = boxes.xyxy.cpu().numpy()
+                            conf = boxes.conf.cpu().numpy()
+                            cls  = boxes.cls.cpu().numpy().astype(int)
+                            h, w = frame.shape[:2]
+                            for (x1, y1, x2, y2), c, k in zip(xyxy, conf, cls):
+                                dets.append({
+                                    "boundingBox": {
+                                        "x": float(x1 / w),
+                                        "y": float(y1 / h),
+                                        "width":  float((x2 - x1) / w),
+                                        "height": float((y2 - y1) / h),
+                                    },
+                                    "ripeness": str(names.get(int(k), str(k))),  # ← 한글 클래스명 가능
+                                    "confidence": float(c),
+                                })
+                    # ⚠️ OpenCV plot() 쓰지 말고, 우리 PIL 라벨러로 출력
+                    draw_overlay(frame, dets, width, height)
+                    annotated = frame
+                else:
+                    annotated = frame
+
+                out.write(annotated)
+                if (i % 32) == 0:
+                    gc.collect()
                 i += 1
     finally:
         cap.release()
