@@ -295,6 +295,12 @@ USE_FFMPEG = os.getenv("USE_FFMPEG", "1") == "1"
 FINAL_CONF  = float(os.getenv("FINAL_CONF",  "0.10"))
 MAX_DET     = int(os.getenv("MAX_DET",      "3"))
 
+try:
+    from imageio_ffmpeg import get_ffmpeg_exe
+    FFMPEG_BIN = get_ffmpeg_exe()
+except Exception:
+    FFMPEG_BIN = shutil.which("ffmpeg")  # 시스템 ffmpeg가 있으면 그거 사용
+
 # --- YOLO 로드 ---
 MODEL_PATH = BASE_DIR / "best.pt"
 
@@ -924,8 +930,8 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
 
     # 인코더
     using_ffmpeg, proc, vw = False, None, None
-    if shutil.which("ffmpeg") and USE_FFMPEG: 
-        cmd = ["ffmpeg","-y","-loglevel","error","-f","rawvideo","-pix_fmt","bgr24",
+    if FFMPEG_BIN and USE_FFMPEG: 
+        cmd = [FFMPEG_BIN,"-y","-loglevel","error","-f","rawvideo","-pix_fmt","bgr24",
                "-s", f"{view_w}x{view_h}","-r", str(fps), "-i","-",
                "-c:v","libx264","-preset","ultrafast","-crf","30",
                "-threads","1","-max_muxing_queue_size","64","-bufsize","2M",
@@ -969,8 +975,6 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
         del left
         import gc; gc.collect()
 
-FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "1")) 
-
 FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "2"))               # ← 기본 2로
 VIDEO_INFER_SIZE = int(os.getenv("VIDEO_INFER_SIZE", "640"))     # ← 512~640 권장
 
@@ -983,27 +987,39 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps    = cap.get(cv2.CAP_PROP_FPS) or SCROLL_FPS
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    if not out.isOpened():
-        cap.release()
-        raise RuntimeError("cannot open output video")
-
-    # 스크롤 비디오에서 프레임당 수평 이동량(px)을 추정
-    frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
-    pan_step_px = max(1, width // frames_per_tile)   # compose 때 사용한 step과 동일 로직
-    pan_step_norm = pan_step_px / float(width)       # 정규화 이동량
+    using_ffmpeg, proc, out = False, None, None
+    if FFMPEG_BIN and USE_FFMPEG:
+        cmd = [
+            FFMPEG_BIN, "-y", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "bgr24",
+            "-s", f"{width}x{height}", "-r", str(fps), "-i", "-",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            output_path,
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if proc.stdin is None:
+            cap.release()
+            raise RuntimeError("failed to open ffmpeg stdin")
+        using_ffmpeg = True
+    else:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        if not out.isOpened():
+            cap.release()
+            raise RuntimeError("cannot open output video (no ffmpeg and mp4v unsupported)")
 
     names = getattr(model, "names", {}) or {}
+    frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
+    pan_step_px = max(1, width // frames_per_tile)
+    pan_step_norm = pan_step_px / float(width)
 
     try:
         import torch, gc
         torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
 
         i = 0
-        last_dets = None
-        last_det_i = -1
-
+        last_dets, last_det_i = None, -1
         with torch.inference_mode():
             while True:
                 ret, frame = cap.read()
@@ -1014,10 +1030,9 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
                 dets_for_draw = None
 
                 if run_detect:
-                    # ↓↓↓ YOLO 추론 크기 축소 + 로그 끔
                     results = model(frame, imgsz=VIDEO_INFER_SIZE, conf=FINAL_CONF, verbose=False)
                     dets = []
-                    if results and len(results) > 0:
+                    if results:
                         r = results[0]
                         boxes = getattr(r, "boxes", None)
                         if boxes is not None and boxes.xyxy is not None:
@@ -1029,37 +1044,37 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
                             for (x1, y1, x2, y2), c, k in zip(xyxy, conf, cls):
                                 dets.append({
                                     "boundingBox": {
-                                        "x":      float(x1 * inv_w),
-                                        "y":      float(y1 * inv_h),
-                                        "width":  float((x2 - x1) * inv_w),
-                                        "height": float((y2 - y1) * inv_h),
+                                        "x": float(x1*inv_w), "y": float(y1*inv_h),
+                                        "width": float((x2-x1)*inv_w), "height": float((y2-y1)*inv_h),
                                     },
                                     "ripeness": str(names.get(int(k), str(k))),
                                     "confidence": float(c),
                                 })
-
-                    last_dets = dets
-                    last_det_i = i
+                    last_dets, last_det_i = dets, i
                     dets_for_draw = dets
-
                 else:
-                    # 탐지 건너뜀 → 이전 결과를 팬 이동량만큼 왼쪽(-)으로 평행이동
                     if last_dets is not None and last_det_i >= 0:
                         since = i - last_det_i
                         dx_norm = - since * pan_step_norm
                         dets_for_draw = _shift_norm_boxes(last_dets, dx_norm)
 
-                # 그리기(건너뛴 프레임도 박스는 보이게)
                 if dets_for_draw:
                     draw_overlay(frame, dets_for_draw, width, height)
 
-                out.write(frame)
+                if using_ffmpeg: proc.stdin.write(frame.tobytes())
+                else:            out.write(frame)
+
                 if (i % 32) == 0:
                     gc.collect()
                 i += 1
     finally:
         cap.release()
-        out.release()
+        if using_ffmpeg:
+            try: proc.stdin.close()
+            except: pass
+            proc.wait(timeout=30)
+        else:
+            out.release()
 
 def create_scroll_then_detect_video(current_user, task_id: str, manifest: List[Dict[str, str]]) -> None:
     view_w, view_h = TARGET_W, TARGET_H
