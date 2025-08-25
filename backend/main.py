@@ -289,6 +289,7 @@ MAX_BYTES = int(os.getenv("MAX_BYTES", str(8*1024*1024)))    # 10MB/파일
 #  비디오 생성(멀티 이미지) 최적화 + 해상도 키우기
 INFER_EVERY_N_FRAMES = int(os.getenv("INFER_EVERY_N_FRAMES", "10"))
 VIDEO_FPS = int(os.getenv("VIDEO_FPS", "8"))
+USE_FFMPEG = os.getenv("USE_FFMPEG", "1") == "1"
 
 # 감지 파라미터
 FINAL_CONF  = float(os.getenv("FINAL_CONF",  "0.10"))
@@ -789,6 +790,25 @@ SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6"))
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers for the scroll video pipeline
 # ────────────────────────────────────────────────────────────────────────────────
+def _shift_norm_boxes(dets: list, dx_norm: float) -> list:
+    """정규화 박스들을 x방향으로 dx_norm만큼 평행이동(+클램프)."""
+    out = []
+    for d in dets or []:
+        bb = d.get("boundingBox") or {}
+        x = float(bb.get("x", 0.0)) + dx_norm
+        y = float(bb.get("y", 0.0))
+        w = float(bb.get("width", 0.0))
+        h = float(bb.get("height", 0.0))
+        # 경계 클램프 및 우측 넘침 보정
+        x = max(0.0, min(1.0, x))
+        w = max(0.0, min(1.0 - x, w))
+        out.append({
+            "boundingBox": {"x": x, "y": max(0.0, min(1.0, y)),
+                            "width": w, "height": max(0.0, min(1.0 - y, h))},
+            "ripeness": d.get("ripeness", ""),
+            "confidence": float(d.get("confidence", 0.0)),
+        })
+    return out
 
 # 최소한의 오버레이(박스/라벨) 함수 — 한글 폰트, 경계 클램프 포함
 def draw_overlay(frame_bgr, detections, w=None, h=None):
@@ -904,7 +924,7 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
 
     # 인코더
     using_ffmpeg, proc, vw = False, None, None
-    if shutil.which("ffmpeg"):
+    if shutil.which("ffmpeg") and USE_FFMPEG: 
         cmd = ["ffmpeg","-y","-loglevel","error","-f","rawvideo","-pix_fmt","bgr24",
                "-s", f"{view_w}x{view_h}","-r", str(fps), "-i","-",
                "-c:v","libx264","-preset","ultrafast","-crf","30",
@@ -951,6 +971,9 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
 
 FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "1")) 
 
+FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "2"))               # ← 기본 2로
+VIDEO_INFER_SIZE = int(os.getenv("VIDEO_INFER_SIZE", "640"))     # ← 512~640 권장
+
 def detect_video_and_write(input_path: str, output_path: str) -> None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -966,23 +989,33 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
         cap.release()
         raise RuntimeError("cannot open output video")
 
-    # 클래스 이름 (Ultralytics 모델이 들고 있음)
+    # 스크롤 비디오에서 프레임당 수평 이동량(px)을 추정
+    frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
+    pan_step_px = max(1, width // frames_per_tile)   # compose 때 사용한 step과 동일 로직
+    pan_step_norm = pan_step_px / float(width)       # 정규화 이동량
+
     names = getattr(model, "names", {}) or {}
 
     try:
-        i = 0
         import torch, gc
+        torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
+
+        i = 0
+        last_dets = None
+        last_det_i = -1
+
         with torch.inference_mode():
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-                # 필요 시 프레임 스트라이드 적용
                 run_detect = (i % FRAME_STRIDE == 0)
+                dets_for_draw = None
 
                 if run_detect:
-                    results = model(frame, verbose=False)
+                    # ↓↓↓ YOLO 추론 크기 축소 + 로그 끔
+                    results = model(frame, imgsz=VIDEO_INFER_SIZE, conf=FINAL_CONF, verbose=False)
                     dets = []
                     if results and len(results) > 0:
                         r = results[0]
@@ -992,24 +1025,35 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
                             conf = boxes.conf.cpu().numpy()
                             cls  = boxes.cls.cpu().numpy().astype(int)
                             h, w = frame.shape[:2]
+                            inv_w, inv_h = 1.0 / w, 1.0 / h
                             for (x1, y1, x2, y2), c, k in zip(xyxy, conf, cls):
                                 dets.append({
                                     "boundingBox": {
-                                        "x": float(x1 / w),
-                                        "y": float(y1 / h),
-                                        "width":  float((x2 - x1) / w),
-                                        "height": float((y2 - y1) / h),
+                                        "x":      float(x1 * inv_w),
+                                        "y":      float(y1 * inv_h),
+                                        "width":  float((x2 - x1) * inv_w),
+                                        "height": float((y2 - y1) * inv_h),
                                     },
-                                    "ripeness": str(names.get(int(k), str(k))),  # ← 한글 클래스명 가능
+                                    "ripeness": str(names.get(int(k), str(k))),
                                     "confidence": float(c),
                                 })
-                    # ⚠️ OpenCV plot() 쓰지 말고, 우리 PIL 라벨러로 출력
-                    draw_overlay(frame, dets, width, height)
-                    annotated = frame
-                else:
-                    annotated = frame
 
-                out.write(annotated)
+                    last_dets = dets
+                    last_det_i = i
+                    dets_for_draw = dets
+
+                else:
+                    # 탐지 건너뜀 → 이전 결과를 팬 이동량만큼 왼쪽(-)으로 평행이동
+                    if last_dets is not None and last_det_i >= 0:
+                        since = i - last_det_i
+                        dx_norm = - since * pan_step_norm
+                        dets_for_draw = _shift_norm_boxes(last_dets, dx_norm)
+
+                # 그리기(건너뛴 프레임도 박스는 보이게)
+                if dets_for_draw:
+                    draw_overlay(frame, dets_for_draw, width, height)
+
+                out.write(frame)
                 if (i % 32) == 0:
                     gc.collect()
                 i += 1
