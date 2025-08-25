@@ -183,18 +183,20 @@ admin.add_view(UserAdmin)
 admin.add_view(AnalysisAdmin)
 
 # --- CORS 설정 ---
-FRONT_EXACT = [
+FRONT_FIXED = [
+    "http://localhost:5173",
     "https://classification-banana-frontend.onrender.com",
-    "https://classification-banana-backend.onrender.com",
     "https://classification-banana.onrender.com",
     "https://classification-banana-2.onrender.com",
-    "http://localhost:5173",
 ]
+
+FRONT_REGEX = r"^https://classification-banana(?:-[a-z0-9]+)?\.onrender\.com$"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONT_EXACT,   # ← 정규식 사용 안 함
-    allow_credentials=False,
+    allow_origins=FRONT_FIXED,          # 고정값 우선 매치
+    allow_origin_regex=FRONT_REGEX,     # 변형 서브도메인 폭넓게 허용
+    allow_credentials=False,            # 쿠키 기반 인증 안 쓰면 False
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Type", "Cache-Control", "Content-Disposition"],
@@ -707,8 +709,7 @@ def decode_and_cover(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
         raise ValueError("이미지 디코딩 실패")
     return resize_cover(img, dst_w, dst_h) 
 
-HOLD_SEC  = _float("SECONDS_PER_IMAGE", 1.5)
-SCROLL_SLOW = float(os.getenv("SCROLL_SLOW", "1.6"))
+HOLD_SEC  = _float("SECONDS_PER_IMAGE", "1.5")
 # ---------------------------
 # 오버레이(박스/라벨) 그리기
 # ---------------------------
@@ -774,7 +775,6 @@ def draw_overlay(frame_bgr: np.ndarray, detections: list, w: int, h: int) -> Non
 # ---------------------------------------
 # 비디오 작성: 좌→우 패닝(확대 + 이동)으로 실시간 스캔 느낌
 # ---------------------------------------
-TILE_PAD = int(os.getenv("TILE_PAD", "0"))
 
 # --- 여백 없이 정사이즈로 맞추기(cover)
 def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
@@ -919,8 +919,8 @@ def create_analysis_video(
 
 # ▼ Environment knobs
 SCROLL_MODE = os.getenv("SCROLL_MODE", "1") == "1" # enable new scroll pipeline
-SCROLL_FPS = int(os.getenv("SCROLL_FPS", str(VIDEO_FPS))) # default = existing VIDEO_FPS
-SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "0.8")) # time a single tile stays on screen while panning
+SCROLL_FPS = int(os.getenv("SCROLL_FPS", "15"))
+SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6")) # time a single tile stays on screen while panning
 DETECT_EVERY_FRAME = os.getenv("DETECT_EVERY_FRAME", "0") == "1" # turn on if you want frame-by-frame YOLO (slower)
 SHOW_LABELS = os.getenv("SHOW_LABELS", "1") == "1"
 

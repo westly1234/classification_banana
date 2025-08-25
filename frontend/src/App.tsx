@@ -5,7 +5,7 @@ import Sidebar from './components/Sidebar';
 import AuthPage from './components/Auth';
 import Dashboard from './components/Dashboard';
 import Analyze from './components/Analyze';
-import { startKeepAlive } from './lib/keepAlive';
+import { startKeepAlive, stopKeepAlive } from './lib/keepAlive';
 
 const ProtectedRoute: React.FC = () => { // children prop은 더 이상 필요 없습니다.
     const { user, loading } = useAuth(); // AuthContext에서 user와 loading 상태를 가져옵니다.
@@ -54,7 +54,10 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
   useEffect(() => {
-    startKeepAlive(180_000); // 3분마다 서버에 ping
+    startKeepAlive(180_000);  // 3분 기본 + 지터/백오프
+    return () => {
+      stopKeepAlive();        // ✅ 언마운트 시 정리
+    };
   }, []);
   
   const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
