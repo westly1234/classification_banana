@@ -434,16 +434,13 @@ def _heavy_init():
         print(f"🔃 Loading PyTorch (CPU): {MODEL_PATH}")
         m = YOLO(MODEL_PATH)  # .pt
 
-        # 1) 원본 영문 라벨 표 저장
+        # 원본 영문 라벨을 저장만 해둠 (setter 쓰지 않음)
         nm = getattr(m, "names", {})
         if isinstance(nm, dict):
             LABELS_EN = {int(i): str(v) for i, v in nm.items()}
         else:
             LABELS_EN = {i: str(v) for i, v in enumerate(list(nm))}
         globals()["MODEL_NAMES_EN_BY_ID"] = LABELS_EN
-
-        # 2) 표시용 한글 라벨로 덮어쓰기 (Ultralytics 내부 annotate 대비)
-        m.names = {i: KOREAN_CLASSES.get(v, v) for i, v in LABELS_EN.items()}
 
         # 약간의 CPU 최적화
         try:
@@ -1031,7 +1028,6 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
             cap.release()
             raise RuntimeError("cannot open output video (no ffmpeg and mp4v unsupported)")
 
-    names = getattr(model, "names", {}) or {}
     frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
     pan_step_px = max(1, width // frames_per_tile)
     pan_step_norm = pan_step_px / float(width)
