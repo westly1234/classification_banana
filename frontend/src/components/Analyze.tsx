@@ -87,7 +87,6 @@ function mergeServerImageResults(
       avg_confidence: m.avg_confidence ?? s.avg_confidence,
       error: m.error ?? null,        // ⬅️ 서버 에러 반영
       isLoading: !finished,          // ⬅️ 완료면 로딩 해제
-      coverMode: true,
     };
   });
   persistStrip(next);
@@ -192,7 +191,7 @@ export default function Analyze() {
         isLoading: false,
         isSelected: false,
         avg_confidence: a.avg_confidence,
-        coverMode: a.coverMode ?? true, 
+        coverMode: a.coverMode ?? false, 
       })));
 
       // 미디어 뷰어 첫 장 보여주기
@@ -324,7 +323,7 @@ export default function Analyze() {
       setAnalysisStates(prev => {
         const next =prev.map(s =>
           s.id === targetState.id
-            ? { ...s, result: formattedDetections, avg_confidence: avg_confidence ?? 0, isLoading: false, coverMode: true }
+            ? { ...s, result: formattedDetections, avg_confidence: avg_confidence ?? 0, isLoading: false, coverMode: false }
             : s
         );
         persistStrip(next);      // ⬅️
@@ -370,7 +369,6 @@ export default function Analyze() {
                   avg_confidence: match.avg_confidence ?? 0,
                   isLoading: false,
                   error: null,
-                  coverMode: true, 
                 }
               : s;
           });
@@ -540,9 +538,7 @@ export default function Analyze() {
                       ref={imgRef}
                       src={mainViewerUrl}
                       alt="Main view"
-                      className={selected?.coverMode
-                        ? "w-full h-full object-cover rounded-lg"
-                        : "w-full h-full object-contain rounded-lg"}
+                      className="w-full h-full object-contain rounded-lg"
                       onLoad={calcOverlay}
                     />
                       {imgOverlay && selected?.result?.length ? (
