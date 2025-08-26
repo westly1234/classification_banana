@@ -534,24 +534,17 @@ export default function Analyze() {
                 </div>
               ) : (
                 // 이미지 + 박스
-                <div ref={imgWrapRef} className="relative w-full h-full flex justify-center items-center">(
-                    <div
-                      className="absolute"
-                      style={{
-                        left:   imgOverlay?.offX   ?? 0,
-                        top:    imgOverlay?.offY   ?? 0,
-                        width:  imgOverlay?.drawW  ?? '100%',  // ⬅️ 초기엔 래퍼 100%
-                        height: imgOverlay?.drawH  ?? '100%',  // ⬅️
-                      }}
-                    >
-                      <img
-                        ref={imgRef}
-                        src={mainViewerUrl}
-                        alt="Main view"
-                        className={selected?.coverMode ? "w-full h-full object-cover rounded-lg" : "w-full h-full object-contain rounded-lg"}
-                        onLoad={calcOverlay}
-                      />
-
+                <div ref={imgWrapRef} className="relative w-full aspect-[4/3] max-h-[600px] flex justify-center items-center">
+                  <div className="absolute inset-0">
+                    <img
+                      ref={imgRef}
+                      src={mainViewerUrl}
+                      alt="Main view"
+                      className={selected?.coverMode
+                        ? "w-full h-full object-cover rounded-lg"
+                        : "w-full h-full object-contain rounded-lg"}
+                      onLoad={calcOverlay}
+                    />
                       {imgOverlay && selected?.result?.length ? (
                         <div className="absolute inset-0 pointer-events-none z-10">
                           {selected.result.map((det: any, i: number) => {
