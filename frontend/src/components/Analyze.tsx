@@ -147,7 +147,7 @@ export default function Analyze() {
     const offX  = Math.floor((wrapW - drawW) / 2);
     const offY  = Math.floor((wrapH - drawH) / 2);
     setImgOverlay({ drawW, drawH, offX, offY });
-  }, [selected?.coverMode]);        // ✅ 모드 변경 시 재계산
+  }, [selected?.coverMode, mainViewerUrl]);        // ✅ 모드 변경 시 재계산
 
   useEffect(() => {
     return () => {
@@ -539,10 +539,10 @@ export default function Analyze() {
                     <div
                       className="absolute"
                       style={{
-                        left: imgOverlay.offX,
-                        top:  imgOverlay.offY,
-                        width:  imgOverlay.drawW,
-                        height: imgOverlay.drawH,
+                        left:   imgOverlay?.offX   ?? 0,
+                        top:    imgOverlay?.offY   ?? 0,
+                        width:  imgOverlay?.drawW  ?? '100%',  // ⬅️ 초기엔 래퍼 100%
+                        height: imgOverlay?.drawH  ?? '100%',  // ⬅️
                       }}
                     >
                       <img
@@ -553,7 +553,7 @@ export default function Analyze() {
                         onLoad={calcOverlay}
                       />
 
-                      {selected?.result?.length ? (
+                      {imgOverlay && selected?.result?.length ? (
                         <div className="absolute inset-0 pointer-events-none z-10">
                           {selected.result.map((det: any, i: number) => {
                             const { drawW, drawH } = imgOverlay!;
