@@ -121,22 +121,26 @@ export default function Analyze() {
   const calcOverlay = useCallback(() => {
     const wrap = imgWrapRef.current;
     const img  = imgRef.current;
+    const cover = !!selected?.coverMode;   // ✅ 모드 확인
     if (!wrap || !img) return;
 
-    // 브라우저가 실제로 그린 박스(픽셀)만 사용
-    const wrapRect = wrap.getBoundingClientRect();
-    const imgRect  = img.getBoundingClientRect();
+    const wrapW = wrap.clientWidth || 1;
+    const wrapH = wrap.clientHeight || 1;
 
-    const drawW = Math.round(imgRect.width);
-    const drawH = Math.round(imgRect.height);
+    if (cover) {
+      // image는 object-cover로 꽉 채움 → 레터박스 없음
+      setImgOverlay({ offX: 0, offY: 0, drawW: wrapW, drawH: wrapH });
+      return;
+    }
 
-    // 오버레이의 좌상단은 "이미지의 좌상단 - 래퍼의 좌상단"
-    const offX = Math.round(imgRect.left - wrapRect.left);
-    const offY = Math.round(imgRect.top  - wrapRect.top);
-
+    // contain 모드(현재 로직)
+    const s = Math.min(wrapW / (img.naturalWidth || 1), wrapH / (img.naturalHeight || 1));
+    const drawW = Math.round((img.naturalWidth || wrapW) * s);
+    const drawH = Math.round((img.naturalHeight || wrapH) * s);
+    const offX  = Math.floor((wrapW - drawW) / 2);
+    const offY  = Math.floor((wrapH - drawH) / 2);
     setImgOverlay({ drawW, drawH, offX, offY });
-  }, []);
-
+  }, [selected?.coverMode]);        // ✅ 모드 변경 시 재계산
 
   useEffect(() => {
     return () => {
@@ -228,7 +232,7 @@ export default function Analyze() {
 
   useEffect(() => {
     calcOverlay();
-  }, [calcOverlay, mainViewerUrl, selected?.result, leftColH]);
+  }, [calcOverlay, mainViewerUrl, selected?.result, selected?.coverMode, leftColH]);
 
   //const makeObjectUrl = (file: File) => URL.createObjectURL(file);
 
@@ -531,7 +535,7 @@ export default function Analyze() {
                     className={selected?.coverMode
                       ? "w-full h-full object-cover rounded-lg"   // ⬅️ cover
                       : "max-h-[500px] w-auto object-contain rounded-lg"}  // ⬅️ 기존
-                    onLoad={calcOverlay}
+                    onLoad={() => requestAnimationFrame(calcOverlay)} 
                   />
                   {imgOverlay && selected?.result?.length ? (
                     <div
