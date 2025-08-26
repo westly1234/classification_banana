@@ -309,6 +309,14 @@ KOREAN_CLASSES = {
     "unripe": "미숙"
 }
 
+def _map_ripeness(r):
+    # r이 정수 ID면 id_to_kor()로, 문자열이면 dict로 매핑, 없으면 원문 유지
+    if isinstance(r, int):
+        return id_to_kor(r)
+    if isinstance(r, str):
+        return KOREAN_CLASSES.get(r, r)
+    return ""
+
 LABEL_SCORE = {
     "미숙": 20,
     "신선한 미숙": 40,
@@ -523,6 +531,21 @@ class _SkipNoise(logging.Filter):
 
 logger.addFilter(_SkipNoise())
 
+# make smooth video helper func
+def pack_det(x1, y1, x2, y2, conf, cls_name, W, H):
+    nx, ny = x1 / W, y1 / H
+    nw, nh = max(0.0, (x2 - x1) / W), max(0.0, (y2 - y1) / H)
+    nx = max(0.0, min(1.0, nx))
+    ny = max(0.0, min(1.0, ny))
+    nw = max(0.0, min(1.0 - nx, nw))
+    nh = max(0.0, min(1.0 - ny, nh))
+    return {
+        "boundingBox": {"x": nx, "y": ny, "width": nw, "height": nh},
+        "label": cls_name,      # 프론트가 최우선으로 읽음
+        "ripeness": cls_name,   # 하위호환
+        "confidence": float(conf),
+    }
+
 # --- YOLO 분석 함수 (여러 객체 지원) ---
 def letterbox_image(img, target_width, target_height):
     h, w = img.shape[:2]
@@ -552,37 +575,43 @@ def run_yolo_np_bgr(imgs_bgr, imgsz=None, conf=None, max_det=None):
     outputs = []
 
     for img_bgr, res in zip(imgs, res_list):
-        h, w = img_bgr.shape[:2]
+        H, W = img_bgr.shape[:2]
         dets = []
-        for box in (res.boxes or []):
-            k_id = int(box.cls.item())
-            en = id_to_en(k_id)  # ← 영문
+
+        boxes = getattr(res, "boxes", None)
+        if boxes is None or len(boxes) == 0:
+            outputs.append(dets)
+            continue
+
+        # 배열로 꺼내 한 번에 루프
+        xyxy  = boxes.xyxy.cpu().numpy()
+        confs = boxes.conf.cpu().numpy()
+        clss  = boxes.cls.cpu().numpy().astype(int)
+
+        for (x1, y1, x2, y2), c, k_id in zip(xyxy, confs, clss):
+            en = id_to_en(int(k_id))        # 영문 클래스 (freshness 맵핑에 사용)
             if en not in VALID_EN:
                 continue
 
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            x1 = max(0.0, min(w - 1.0, x1))
-            y1 = max(0.0, min(h - 1.0, y1))
-            x2 = max(0.0, min(w - 1.0, x2))
-            y2 = max(0.0, min(h - 1.0, y2))
-            if x2 <= x1: x2 = min(w - 1.0, x1 + 1.0)
-            if y2 <= y1: y2 = min(h - 1.0, y1 + 1.0)
+            # 프레임 경계로 클램프 (폭/높이 최소 1px)
+            x1 = max(0.0, min(W - 1.0, float(x1)))
+            y1 = max(0.0, min(H - 1.0, float(y1)))
+            x2 = max(0.0, min(W - 1.0, float(x2)))
+            y2 = max(0.0, min(H - 1.0, float(y2)))
+            if x2 <= x1: x2 = min(W - 1.0, x1 + 1.0)
+            if y2 <= y1: y2 = min(H - 1.0, y1 + 1.0)
 
-            nx = x1 / w; ny = y1 / h
-            nw = (x2 - x1) / w; nh = (y2 - y1) / h
-            eps = 1e-4
-            if nx + nw > 1.0: nw = max(0.0, 1.0 - nx - eps)
-            if ny + nh > 1.0: nh = max(0.0, 1.0 - ny - eps)
+            # 한글 라벨
+            cls_name = id_to_kor(int(k_id))
 
-            dets.append({
-                "ripeness": id_to_kor(k_id),                     # ← 한글
-                "confidence": float(box.conf.item()),
-                "freshness": round(FRESHNESS_MAP.get(en, 0.0), 3),  # ← 영문 키로 매핑
-                "boundingBox": {
-                    "x": round(nx, 4), "y": round(ny, 4),
-                    "width": round(nw, 4), "height": round(nh, 4),
-                },
-            })
+            # ✅ 여기서 pack_det 사용 (label이 항상 들어감)
+            det = pack_det(x1, y1, x2, y2, float(c), cls_name, W, H)
+
+            # 추가 필드 유지 (기존 기능 보존)
+            det["freshness"] = round(FRESHNESS_MAP.get(en, 0.0), 3)
+
+            dets.append(det)
+
         outputs.append(dets)
 
     return outputs[0] if single_input else outputs
@@ -812,6 +841,7 @@ SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6"))
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers for the scroll video pipeline
 # ────────────────────────────────────────────────────────────────────────────────
+
 def _shift_norm_boxes(dets: list, dx_norm: float) -> list:
     """정규화 박스들을 x방향으로 dx_norm만큼 평행이동(+클램프)."""
     out = []
@@ -824,10 +854,15 @@ def _shift_norm_boxes(dets: list, dx_norm: float) -> list:
         # 경계 클램프 및 우측 넘침 보정
         x = max(0.0, min(1.0, x))
         w = max(0.0, min(1.0 - x, w))
+
+        raw_label = d.get("label")
+        title = raw_label if raw_label else _map_ripeness(d.get("ripeness"))
+
         out.append({
             "boundingBox": {"x": x, "y": max(0.0, min(1.0, y)),
                             "width": w, "height": max(0.0, min(1.0 - y, h))},
-            "ripeness": id_to_kor(d.get("ripeness", "")), 
+            "label": title,             
+            "ripeness": d.get("ripeness", title),           
             "confidence": float(d.get("confidence", 0.0)),
         })
     return out
@@ -890,7 +925,7 @@ def draw_overlay(frame_bgr, detections, w=None, h=None):
         x1 = int(round(nx * w))
         y1 = int(round(ny * h))
 
-        label = f"{d.get('ripeness','')} {float(d.get('confidence',0.0))*100:.1f}%".strip()
+        label =  f"{d.get('label') or d.get('ripeness','')} {float(d.get('confidence',0.0))*100:.1f}%".strip()
         if not label:
             continue
 
@@ -1057,17 +1092,12 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
                             xyxy = boxes.xyxy.cpu().numpy()
                             conf = boxes.conf.cpu().numpy()
                             cls  = boxes.cls.cpu().numpy().astype(int)
-                            h, w = frame.shape[:2]
-                            inv_w, inv_h = 1.0 / w, 1.0 / h
+                            H, W = frame.shape[:2]
+                            names = r.names if hasattr(r, "names") else getattr(model, "names", {})
                             for (x1, y1, x2, y2), c, k in zip(xyxy, conf, cls):
-                                dets.append({
-                                    "boundingBox": {
-                                        "x": float(x1*inv_w), "y": float(y1*inv_h),
-                                        "width": float((x2-x1)*inv_w), "height": float((y2-y1)*inv_h),
-                                    },
-                                    "ripeness": id_to_kor(int(k)),
-                                    "confidence": float(c),
-                                })
+                                cls_name = id_to_kor(names[int(k)]) if names else id_to_kor(int(k))
+                                dets.append(pack_det(float(x1), float(y1), float(x2), float(y2),
+                                                    float(c), cls_name, W, H))
                     last_dets, last_det_i = dets, i
                     dets_for_draw = dets
                 else:

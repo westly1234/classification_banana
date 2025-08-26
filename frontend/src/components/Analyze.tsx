@@ -4,6 +4,7 @@ import { useDropzone } from 'react-dropzone';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { YoloAnalysisResult, ImageAnalysisResultPayload } from '../types';
 import api from './api';
+import {matchAndSmooth} from '../lib/helpers';
 import { UploadCloud, Trash2, XCircle, Loader2, Image, Sparkles, Files } from 'lucide-react';
 
 interface AnalysisState {
@@ -105,7 +106,9 @@ export default function Analyze() {
   const hasSelectedItems = analysisStates.some(s => s.isSelected);
   const selected = analysisStates.find(s => s.id === activeId) || null;
   const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
-  // state: 지금 뷰어가 비디오인지 이미지인지 판단
+  const savedActive = sessionStorage.getItem('activeId');
+  const savedViewer = sessionStorage.getItem('mainViewerUrl');
+
   const isVideo = !!videoUrl; 
   // 백엔드에서 준 view_w/view_h가 있으면 그걸 사용(없으면 4/3 기본)
   const [viewSize] = useState<{w:number,h:number}|null>(null);
@@ -160,6 +163,14 @@ export default function Analyze() {
   }, []);
 
   useEffect(() => {
+    if (activeId) sessionStorage.setItem('activeId', activeId);
+  }, [activeId]);
+
+  useEffect(() => {
+    if (mainViewerUrl) sessionStorage.setItem('mainViewerUrl', mainViewerUrl);
+  }, [mainViewerUrl]);
+
+  useEffect(() => {
     const savedRel = sessionStorage.getItem('lastVideoUrl');
     if (savedRel) {
       const absolute = api.getUri({ url: savedRel }); // baseURL로 복원
@@ -191,8 +202,8 @@ export default function Analyze() {
       })));
 
       // 미디어 뷰어 첫 장 보여주기
-      setActiveId(arr[0]?.id ?? null);
-      setMainViewerUrl(prev => prev ?? arr[0]?.previewUrl ?? null);
+      setActiveId(savedActive ?? arr[0]?.id ?? null);
+      setMainViewerUrl(savedViewer ?? arr[0]?.previewUrl ?? null);
     } catch {}
   }, []);
 
@@ -236,7 +247,19 @@ export default function Analyze() {
     calcOverlay();
   }, [calcOverlay, mainViewerUrl, selected?.result, selected?.coverMode, leftColH]);
 
-  //const makeObjectUrl = (file: File) => URL.createObjectURL(file);
+  const [smoothDets, setSmoothDets] = useState<any[]>([]);
+
+  useEffect(() => {
+    const raw = (selected?.result ?? []).map((d:any) => {
+      const b = d.boundingBox;
+      return {
+        title: d.label ?? d.ripeness ?? d.className ?? d.class ?? '',
+        conf: d.confidence ?? 0,
+        x: b.x, y: b.y, w: b.width, h: b.height,  // 0~1 정규화
+      };
+    });
+    setSmoothDets(prev => matchAndSmooth(prev, raw, 0.25)); // alpha=0.25 정도가 자연스러움
+  }, [selected?.result]);
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const filtered = acceptedFiles.filter(f => f.size > 0 && f.type.startsWith('image/'));
@@ -459,6 +482,14 @@ export default function Analyze() {
       return kept;
     });
   };
+  const boxes = (smoothDets.length ? smoothDets : (selected?.result ?? []).map((d:any) => ({
+    title: d.label ?? d.ripeness ?? d.className ?? d.class ?? '',
+    conf:  d.confidence ?? 0,
+    x:     d.boundingBox?.x ?? 0,
+    y:     d.boundingBox?.y ?? 0,
+    w:     d.boundingBox?.width ?? 0,
+    h:     d.boundingBox?.height ?? 0,
+  })));
 
   return (
     <div className="bg-slate-50 min-h-screen flex flex-col font-sans">
@@ -552,7 +583,7 @@ export default function Analyze() {
                       }}
                     >
                       <div className="absolute inset-0">
-                        {selected.result.map((det: any, i: number) => {
+                        {boxes.map((det: any, i: number) => {
                           const { drawW, drawH } = imgOverlay;
                           const b  = det?.boundingBox || {};
                           const nx = Math.max(0, Math.min(1, Number(b.x)      || 0));
