@@ -530,7 +530,7 @@ export default function Analyze() {
                 </div>
               ) : (
                 // ===== 이미지 + 박스 =====
-                <div ref={imgWrapRef} className="relative w-full h-full flex justify-center items-center">
+                <div ref={imgWrapRef} className="relative w-full h-[320px] sm:h-[360px] md:h-[420px] flex justify-center items-center">
                   {/* 이미지는 항상 렌더(처음에도 안 사라지게) */}
                   <img
                     ref={imgRef}
@@ -584,21 +584,23 @@ export default function Analyze() {
                                 border:'3px solid #FACC15',
                                 borderRadius:2,
                                 boxSizing:'border-box',
-                                overflow:'hidden',
+                                overflow:'visible',
+                                zIndex: 10 + i,  
                               }}
                             >
-                              {!!title && (
-                                <div
-                                  className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
-                                  style={{
-                                    left:0, top:labelTop,
-                                    maxWidth:'100%',
-                                    whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
-                                  }}
-                                >
-                                  {title} {Number(det.confidence * 100).toFixed(1)}%
-                                </div>
-                              )}
+                              <div
+                                className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
+                                style={{
+                                  left: 0,
+                                  top: labelTop,  // 박스 위에 공간 있으면 위로, 없으면 안쪽
+                                  maxWidth: '100%',
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                }}
+                              >
+                                {title} {Number(det.confidence * 100).toFixed(1)}%
+                              </div>
                             </div>
                           );
                         })}
