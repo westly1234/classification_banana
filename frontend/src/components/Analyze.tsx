@@ -399,24 +399,22 @@ export default function Analyze() {
               if (pollRef.current) clearInterval(pollRef.current);
               pollRef.current = null;
 
-              // 마지막으로 한 번 더 머지(혹시 누락된 프레임 보정)
               if (Array.isArray(data.image_results)) {
                 setAnalysisStates(prev => mergeServerImageResults(prev, data.image_results, idsToAnalyze));
               }
-
               setIsAnalyzing(false);
 
               if (data.status === 'SUCCESS') {
                 const finalRel = data.result; // "/results/xxx.mp4"
                 const absolute = data.absolute_result ?? api.getUri({ url: finalRel });
-                const bust = `?t=${Date.now()}`;
+                const once = absolute + `?t=${Date.now()}`;     // ✅ 1회만 버스터
 
-                setVideoUrl(absolute + bust);
-                setMainViewerUrl(absolute + bust);
+                setVideoUrl(prev => prev ?? once);              // ✅ 이미 있으면 유지(재시작 방지)
+                setMainViewerUrl(prev => prev ?? once);
                 sessionStorage.setItem('lastVideoUrl', finalRel);
                 setTaskStatus(null);
               } else {
-                setTaskStatus(`오류: 동영상 생성 실패`);
+                setTaskStatus('오류: 동영상 생성 실패');
               }
             }
           } catch (pollError) {
@@ -513,15 +511,19 @@ export default function Analyze() {
                 // ✅ react-player로 교체 (캐시 방지 쿼리 유지)
                 <div className="w-full max-w-full aspect-video bg-black rounded-lg overflow-hidden">
                   <video
-                    key={mainViewerUrl || ''}
+                    key={videoUrl || ''}              // ✅ URL 바뀔 때만 재마운트
                     src={videoUrl || undefined}
                     controls
-                    autoPlay
-                    muted
-                    loop
                     playsInline
-                    preload="auto"
+                    preload="metadata"                // ✅ 메모리 절약
+                    autoPlay={false}                  // ✅ 끔
+                    loop={false}                      // ✅ 끔
+                    muted                             // 원하면 유지
                     className="w-full h-full object-contain rounded-lg bg-black"
+                    onEnded={e => {                   // ✅ 끝에서 멈춤 보장
+                      e.currentTarget.pause();
+                      e.currentTarget.currentTime = e.currentTarget.duration;
+                    }}
                     onError={(e: any) => {
                       console.error('video load error', e);
                       setTaskStatus('비디오 로드 실패 (네트워크/URL 확인)');

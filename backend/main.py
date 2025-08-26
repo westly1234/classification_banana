@@ -827,7 +827,7 @@ def _shift_norm_boxes(dets: list, dx_norm: float) -> list:
         out.append({
             "boundingBox": {"x": x, "y": max(0.0, min(1.0, y)),
                             "width": w, "height": max(0.0, min(1.0 - y, h))},
-            "ripeness": d.get("ripeness", ""),
+            "ripeness": id_to_kor(d.get("ripeness", "")), 
             "confidence": float(d.get("confidence", 0.0)),
         })
     return out
