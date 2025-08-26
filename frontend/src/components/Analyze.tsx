@@ -47,11 +47,11 @@ const fileToDataUrl = (file: File) =>
   });
 
 // 스트립 상태를 얇게 저장해서 세션에 보존
-type SlimState = Pick<AnalysisState, 'id' | 'previewUrl' | 'result' | 'avg_confidence'>;
+type SlimState = Pick<AnalysisState, 'id' | 'previewUrl' | 'result' | 'avg_confidence'| 'coverMode'>;
 
 const persistStrip = (arr: AnalysisState[]) => {
-  const slim: SlimState[] = arr.map(({ id, previewUrl, result, avg_confidence }) => ({
-    id, previewUrl, result, avg_confidence,
+  const slim: SlimState[] = arr.map(({ id, previewUrl, result, avg_confidence, coverMode }) => ({
+    id, previewUrl, result, avg_confidence, coverMode,
   }));
   sessionStorage.setItem('imageStrip', JSON.stringify(slim));
 };
@@ -181,6 +181,7 @@ export default function Analyze() {
         isLoading: false,
         isSelected: false,
         avg_confidence: a.avg_confidence,
+        coverMode: a.coverMode ?? true, 
       })));
 
       // 미디어 뷰어 첫 장 보여주기
@@ -312,7 +313,7 @@ export default function Analyze() {
       setAnalysisStates(prev => {
         const next =prev.map(s =>
           s.id === targetState.id
-            ? { ...s, result: formattedDetections, avg_confidence: avg_confidence ?? 0, isLoading: false, coverMode: false }
+            ? { ...s, result: formattedDetections, avg_confidence: avg_confidence ?? 0, isLoading: false, coverMode: true }
             : s
         );
         persistStrip(next);      // ⬅️
