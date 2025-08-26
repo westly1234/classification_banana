@@ -543,22 +543,16 @@ export default function Analyze() {
                       }}
                     >
                   {selected.result.map((det: any, i: number) => {
-                    const { drawW, drawH } = imgOverlay;
-
-                    // 1) 정규화 박스 보정(0~1 범위, 우/하단 넘침 방지)
+                    const { drawW, drawH } = imgOverlay!;
                     const b = det.boundingBox ?? {};
                     const nx = Math.max(0, Math.min(1, Number(b.x) || 0));
                     const ny = Math.max(0, Math.min(1, Number(b.y) || 0));
                     const nw = Math.max(0, Math.min(1 - nx, Number(b.width) || 0));
                     const nh = Math.max(0, Math.min(1 - ny, Number(b.height) || 0));
 
-                    // 2) 픽셀로 변환
-                    let x1 = nx * drawW;
-                    let y1 = ny * drawH;
-                    let x2 = (nx + nw) * drawW;
-                    let y2 = (ny + nh) * drawH;
+                    let x1 = nx * drawW, y1 = ny * drawH;
+                    let x2 = (nx + nw) * drawW, y2 = (ny + nh) * drawH;
 
-                    // 3) 오버레이 경계로 한 번 더 클립 (라운딩/경계 오차 대비)
                     x1 = Math.max(0, Math.min(drawW - 1, x1));
                     y1 = Math.max(0, Math.min(drawH - 1, y1));
                     x2 = Math.max(x1 + 1, Math.min(drawW, x2));
@@ -566,23 +560,43 @@ export default function Analyze() {
 
                     const x = Math.round(x1);
                     const y = Math.round(y1);
-                    const w = Math.round(x2 - x1);
-                    const h = Math.round(y2 - y1);
+                    const w = Math.max(1, Math.round(x2 - x1));   // ← 최소 1px 보장
+                    const h = Math.max(1, Math.round(y2 - y1));
 
                     const LABEL_H = 18;
+                    const labelY = y - LABEL_H >= 0 ? y - LABEL_H : y; // 위에 자리 없으면 박스 안
 
-                    // 4) 라벨은 "박스 내부 좌표"로 배치
-                    //    박스 위에 공간 있으면 위(-LABEL_H), 없으면 박스 안(0)
-                    const labelTop = y - LABEL_H >= 0 ? -LABEL_H : 0;
                     return (
-                      <div key={i} style={{ position:'absolute', left:x, top:y, width:w, height:h, border:'3px solid #FACC15', borderRadius:2, boxSizing: "border-box", overflow: 'hidden',}}>
+                      <>
+                        {/* 박스만 */}
                         <div
+                          key={`box-${i}`}
+                          style={{
+                            position: 'absolute',
+                            left: x, top: y, width: w, height: h,
+                            border: '3px solid #FACC15',
+                            borderRadius: 2,
+                            boxSizing: 'border-box',
+                            // overflow: 'hidden',   // ❌ 없애거나 visible
+                          }}
+                        />
+                        {/* 라벨은 형제로 따로 (클립 안 됨) */}
+                        <div
+                          key={`lbl-${i}`}
                           className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
-                          style={{ left: 0, top: labelTop, maxWidth: "100%", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", }} // 박스 위에 붙이고 화면 위로는 못 나가게
+                          style={{
+                            left: x, top: labelY,
+                            zIndex: 20,                // 박스보다 위
+                            pointerEvents: 'none',
+                            maxWidth: '100%',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}
                         >
                           {det.ripeness} {(det.confidence * 100).toFixed(1)}%
                         </div>
-                      </div>
+                      </>
                     );
                   })}
                 </div>
