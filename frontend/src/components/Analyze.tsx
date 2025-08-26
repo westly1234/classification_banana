@@ -116,28 +116,21 @@ export default function Analyze() {
     offX: number; offY: number; drawW: number; drawH: number;
   } | null>(null);
   
-  // ✅ 컴포넌트 스코프에 선언 (JSX에서도 사용 가능)
   const calcOverlay = useCallback(() => {
     const wrap = imgWrapRef.current;
     const img  = imgRef.current;
     if (!wrap || !img) return;
 
-    // wrapper 실제 크기
-    const wrapW = wrap.clientWidth || 1;
-    const wrapH = wrap.clientHeight || 1;
+    // 브라우저가 실제로 그린 박스(픽셀)만 사용
+    const wrapRect = wrap.getBoundingClientRect();
+    const imgRect  = img.getBoundingClientRect();
 
-    // 이미지가 object-contain + w-auto + max-h 로 렌더된 실제 크기
-    const drawW = img.naturalWidth && img.naturalHeight
-      ? Math.min(wrapW, Math.round(img.naturalWidth * Math.min(wrapW / img.naturalWidth, wrapH / img.naturalHeight)))
-      : img.clientWidth || img.offsetWidth || wrapW;
+    const drawW = Math.round(imgRect.width);
+    const drawH = Math.round(imgRect.height);
 
-    const drawH = img.naturalWidth && img.naturalHeight
-      ? Math.min(wrapH, Math.round(img.naturalHeight * Math.min(wrapW / img.naturalWidth, wrapH / img.naturalHeight)))
-      : img.clientHeight || img.offsetHeight || wrapH;
-
-    // 레터박스 오프셋 (센터 정렬)
-    const offX = Math.floor((wrapW - drawW) / 2);
-    const offY = Math.floor((wrapH - drawH) / 2);
+    // 오버레이의 좌상단은 "이미지의 좌상단 - 래퍼의 좌상단"
+    const offX = Math.round(imgRect.left - wrapRect.left);
+    const offY = Math.round(imgRect.top  - wrapRect.top);
 
     setImgOverlay({ drawW, drawH, offX, offY });
   }, []);
@@ -212,11 +205,15 @@ export default function Analyze() {
     if (imgWrapRef.current) roWrap.observe(imgWrapRef.current);
     if (imgRef.current)     roImg.observe(imgRef.current);
 
-    const onLoad = () => calcOverlay();
+    const onLoad = () => {
+      // 레이아웃 확정 뒤 계산
+      requestAnimationFrame(calcOverlay);
+    };
     imgRef.current?.addEventListener('load', onLoad);
     window.addEventListener('resize', calcOverlay);
 
-    calcOverlay(); // 최초 1회
+    // 첫 계산도 rAF로 한번 감싸면 안전
+    requestAnimationFrame(calcOverlay);
 
     return () => {
       roWrap.disconnect();
