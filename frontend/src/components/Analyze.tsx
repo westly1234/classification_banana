@@ -117,7 +117,8 @@ export default function Analyze() {
   const [imgOverlay, setImgOverlay] = useState<{
     offX: number; offY: number; drawW: number; drawH: number;
   } | null>(null);
-  
+
+  const VIEWER_ZOOM = 0.85;
   const calcOverlay = useCallback(() => {
     const wrap = imgWrapRef.current;
     const img  = imgRef.current;
@@ -128,15 +129,21 @@ export default function Analyze() {
     const wrapH = wrap.clientHeight || 1;
 
     if (cover) {
-      // image는 object-cover로 꽉 채움 → 레터박스 없음
-      setImgOverlay({ offX: 0, offY: 0, drawW: wrapW, drawH: wrapH });
+      const dW0 = wrapW, dH0 = wrapH;
+      const drawW = Math.round(dW0 * VIEWER_ZOOM);
+      const drawH = Math.round(dH0 * VIEWER_ZOOM);
+      const offX  = Math.floor((wrapW - drawW) / 2);
+      const offY  = Math.floor((wrapH - drawH) / 2);
+      setImgOverlay({ drawW, drawH, offX, offY });
       return;
     }
 
     // contain 모드(현재 로직)
     const s = Math.min(wrapW / (img.naturalWidth || 1), wrapH / (img.naturalHeight || 1));
-    const drawW = Math.round((img.naturalWidth || wrapW) * s);
-    const drawH = Math.round((img.naturalHeight || wrapH) * s);
+    const dW0 = Math.round((img.naturalWidth  || wrapW) * s);
+    const dH0 = Math.round((img.naturalHeight || wrapH) * s);
+    const drawW = Math.round(dW0 * VIEWER_ZOOM);
+    const drawH = Math.round(dH0 * VIEWER_ZOOM);
     const offX  = Math.floor((wrapW - drawW) / 2);
     const offY  = Math.floor((wrapH - drawH) / 2);
     setImgOverlay({ drawW, drawH, offX, offY });
@@ -528,87 +535,62 @@ export default function Analyze() {
               ) : (
                 // 이미지 + 박스
                 <div ref={imgWrapRef} className="relative w-full h-full flex justify-center items-center">
-                  <img
-                    ref={imgRef}
-                    src={mainViewerUrl}
-                    alt="Main view"
-                    className={selected?.coverMode
-                      ? "w-full h-full object-cover rounded-lg"   // ⬅️ cover
-                      : "max-h-[500px] w-auto object-contain rounded-lg"}  // ⬅️ 기존
-                    onLoad={() => requestAnimationFrame(calcOverlay)} 
-                  />
-                  {imgOverlay && selected?.result?.length ? (
+                  {imgOverlay && (
                     <div
-                      className="absolute pointer-events-none z-10 overflow-hidden"
+                      className="absolute"
                       style={{
                         left: imgOverlay.offX,
-                        top: imgOverlay.offY,
-                        width: imgOverlay.drawW,
+                        top:  imgOverlay.offY,
+                        width:  imgOverlay.drawW,
                         height: imgOverlay.drawH,
                       }}
                     >
-                  {selected.result.map((det: any, i: number) => {
-                    const { drawW, drawH } = imgOverlay!;
-                    const b = det.boundingBox ?? {};
-                    const nx = Math.max(0, Math.min(1, Number(b.x) || 0));
-                    const ny = Math.max(0, Math.min(1, Number(b.y) || 0));
-                    const nw = Math.max(0, Math.min(1 - nx, Number(b.width) || 0));
-                    const nh = Math.max(0, Math.min(1 - ny, Number(b.height) || 0));
+                      <img
+                        ref={imgRef}
+                        src={mainViewerUrl}
+                        alt="Main view"
+                        className={selected?.coverMode ? "w-full h-full object-cover rounded-lg" : "w-full h-full object-contain rounded-lg"}
+                        onLoad={calcOverlay}
+                      />
 
-                    let x1 = nx * drawW, y1 = ny * drawH;
-                    let x2 = (nx + nw) * drawW, y2 = (ny + nh) * drawH;
+                      {selected?.result?.length ? (
+                        <div className="absolute inset-0 pointer-events-none z-10">
+                          {selected.result.map((det: any, i: number) => {
+                            const { drawW, drawH } = imgOverlay!;
+                            const b = det.boundingBox ?? {};
+                            const nx = Math.max(0, Math.min(1, Number(b.x) || 0));
+                            const ny = Math.max(0, Math.min(1, Number(b.y) || 0));
+                            const nw = Math.max(0, Math.min(1 - nx, Number(b.width) || 0));
+                            const nh = Math.max(0, Math.min(1 - ny, Number(b.height) || 0));
 
-                    x1 = Math.max(0, Math.min(drawW - 1, x1));
-                    y1 = Math.max(0, Math.min(drawH - 1, y1));
-                    x2 = Math.max(x1 + 1, Math.min(drawW, x2));
-                    y2 = Math.max(y1 + 1, Math.min(drawH, y2));
+                            let x1 = nx * drawW, y1 = ny * drawH;
+                            let x2 = (nx + nw) * drawW, y2 = (ny + nh) * drawH;
+                            x1 = Math.max(0, Math.min(drawW - 1, x1));
+                            y1 = Math.max(0, Math.min(drawH - 1, y1));
+                            x2 = Math.max(x1 + 1, Math.min(drawW, x2));
+                            y2 = Math.max(y1 + 1, Math.min(drawH, y2));
 
-                    const x = Math.round(x1);
-                    const y = Math.round(y1);
-                    const w = Math.max(1, Math.round(x2 - x1));   // ← 최소 1px 보장
-                    const h = Math.max(1, Math.round(y2 - y1));
+                            const x = Math.round(x1), y = Math.round(y1);
+                            const w = Math.round(x2 - x1), h = Math.round(y2 - y1);
+                            const LABEL_H = 18;
+                            const labelTop = y - LABEL_H >= 0 ? -LABEL_H : 0;
 
-                    const LABEL_H = 18;
-                    const labelY = y - LABEL_H >= 0 ? y - LABEL_H : y; // 위에 자리 없으면 박스 안
-
-                    return (
-                      <>
-                        {/* 박스만 */}
-                        <div
-                          key={`box-${i}`}
-                          style={{
-                            position: 'absolute',
-                            left: x, top: y, width: w, height: h,
-                            border: '3px solid #FACC15',
-                            borderRadius: 2,
-                            boxSizing: 'border-box',
-                            // overflow: 'hidden',   // ❌ 없애거나 visible
-                          }}
-                        />
-                        {/* 라벨은 형제로 따로 (클립 안 됨) */}
-                        <div
-                          key={`lbl-${i}`}
-                          className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
-                          style={{
-                            left: x, top: labelY,
-                            zIndex: 20,                // 박스보다 위
-                            pointerEvents: 'none',
-                            maxWidth: '100%',
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                          }}
-                        >
-                          {det.ripeness} {(det.confidence * 100).toFixed(1)}%
+                            return (
+                              <div key={i} style={{ position:'absolute', left:x, top:y, width:w, height:h, border:'3px solid #FACC15', borderRadius:2, boxSizing:'border-box', overflow:'hidden' }}>
+                                <div className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
+                                    style={{ left:0, top:labelTop, maxWidth:'100%', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                                  {det.ripeness} {(det.confidence*100).toFixed(1)}%
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
-                      </>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </div>
-          )
-        )}
+                      ) : null}
+                    </div>
+                  )}
+                  </div>
+                )
+              )}
             {taskStatus && !videoUrl && (
               <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center text-white z-10 p-4">
                 <Loader2 className="w-10 h-10 animate-spin mb-4" />
