@@ -1154,10 +1154,9 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
     try:
         img_bytes = base64.b64decode(payload.image)
 
-        # ✅ 원본으로 디코드 (letterbox 사용 X)
-        img_bgr = decode_bgr(img_bytes)
-
         loop = asyncio.get_running_loop()
+
+        img_bgr = await loop.run_in_executor(EXECUTOR, decode_and_cover, img_bytes, TARGET_W, TARGET_H)
 
         # run_yolo_np_bgr 이 단일 이미지 버전이면 그대로,
         # 배치(List[np.ndarray]) 버전이면 [img_bgr][0] 으로 꺼내세요.
@@ -1169,7 +1168,7 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
         h, w = img_bgr.shape[:2]
         new_w = 512
         new_h = max(1, int(h * (new_w / max(1, w))))
-        thumb_bgr = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        thumb_bgr = img_bgr
         thumb = cv2.imencode(".jpg", thumb_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])[1].tobytes()
 
         db = SessionLocal()
@@ -1188,7 +1187,7 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
         finally:
             db.close()
 
-        return {"detections": detections, "avg_confidence": avg_conf}
+        return {"detections": detections, "avg_confidence": avg_conf, "view_w": TARGET_W, "view_h": TARGET_H}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

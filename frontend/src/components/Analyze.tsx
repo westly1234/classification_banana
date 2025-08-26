@@ -105,7 +105,10 @@ export default function Analyze() {
   const hasSelectedItems = analysisStates.some(s => s.isSelected);
   const selected = analysisStates.find(s => s.id === activeId) || null;
   const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
-  // const hasMedia = analysisStates.length > 0 || Boolean(mainViewerUrl || videoUrl);
+  // state: 지금 뷰어가 비디오인지 이미지인지 판단
+  const isVideo = !!videoUrl; 
+  // 백엔드에서 준 view_w/view_h가 있으면 그걸 사용(없으면 4/3 기본)
+  const [viewSize, setViewSize] = useState<{w:number,h:number}|null>(null);
   const leftColRef = useRef<HTMLDivElement | null>(null);
   const [leftColH] = useState(0);
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
@@ -509,7 +512,8 @@ export default function Analyze() {
             {mainViewerUrl &&
               (mainViewerUrl === videoUrl ? (
                 // ✅ react-player로 교체 (캐시 방지 쿼리 유지)
-                <div className="w-full max-w-full aspect-video bg-black rounded-lg overflow-hidden">
+                <div className={`w-full max-w-full rounded-lg overflow-hidden bg-black`}
+                    style={{ aspectRatio: isVideo ? '16 / 9' : (viewSize ? `${viewSize.w} / ${viewSize.h}` : '4 / 3') }}>
                   <video
                     key={videoUrl || ''}              // ✅ URL 바뀔 때만 재마운트
                     src={videoUrl || undefined}
