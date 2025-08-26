@@ -15,6 +15,7 @@ interface AnalysisState {
   isLoading: boolean;
   isSelected: boolean;
   avg_confidence?: number;
+  coverMode?: boolean;
 }
 
 type WithFile = AnalysisState & { file: File };
@@ -86,6 +87,7 @@ function mergeServerImageResults(
       avg_confidence: m.avg_confidence ?? s.avg_confidence,
       error: m.error ?? null,        // ⬅️ 서버 에러 반영
       isLoading: !finished,          // ⬅️ 완료면 로딩 해제
+      coverMode: true,
     };
   });
   persistStrip(next);
@@ -310,7 +312,7 @@ export default function Analyze() {
       setAnalysisStates(prev => {
         const next =prev.map(s =>
           s.id === targetState.id
-            ? { ...s, result: formattedDetections, avg_confidence: avg_confidence ?? 0, isLoading: false }
+            ? { ...s, result: formattedDetections, avg_confidence: avg_confidence ?? 0, isLoading: false, coverMode: false }
             : s
         );
         persistStrip(next);      // ⬅️
@@ -356,6 +358,7 @@ export default function Analyze() {
                   avg_confidence: match.avg_confidence ?? 0,
                   isLoading: false,
                   error: null,
+                  coverMode: true, 
                 }
               : s;
           });
@@ -524,7 +527,9 @@ export default function Analyze() {
                     ref={imgRef}
                     src={mainViewerUrl}
                     alt="Main view"
-                    className="max-h-[500px] w-auto object-contain rounded-lg"
+                    className={selected?.coverMode
+                      ? "w-full h-full object-cover rounded-lg"   // ⬅️ cover
+                      : "max-h-[500px] w-auto object-contain rounded-lg"}  // ⬅️ 기존
                     onLoad={calcOverlay}
                   />
                   {imgOverlay && selected?.result?.length ? (
