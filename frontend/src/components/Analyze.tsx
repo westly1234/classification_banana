@@ -5,7 +5,6 @@ import { AnimatePresence, motion } from 'framer-motion';
 import type { YoloAnalysisResult, ImageAnalysisResultPayload } from '../types';
 import api from './api';
 import { UploadCloud, Trash2, XCircle, Loader2, Image, Sparkles, Files } from 'lucide-react';
-//import ReactPlayer from 'react-player';
 
 interface AnalysisState {
   id: string;
@@ -108,30 +107,39 @@ export default function Analyze() {
   // state: 지금 뷰어가 비디오인지 이미지인지 판단
   const isVideo = !!videoUrl; 
   // 백엔드에서 준 view_w/view_h가 있으면 그걸 사용(없으면 4/3 기본)
-  const [viewSize, setViewSize] = useState<{w:number,h:number}|null>(null);
+  const [viewSize] = useState<{w:number,h:number}|null>(null);
   const leftColRef = useRef<HTMLDivElement | null>(null);
   const [leftColH] = useState(0);
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
-  const imgRef = useRef<HTMLImageElement | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null)
   const [imgOverlay, setImgOverlay] = useState<{
     offX: number; offY: number; drawW: number; drawH: number;
   } | null>(null);
-
+  
   // ✅ 컴포넌트 스코프에 선언 (JSX에서도 사용 가능)
   const calcOverlay = useCallback(() => {
-    const wrapEl = imgWrapRef.current;
-    const imgEl  = imgRef.current;
-    if (!wrapEl || !imgEl) return;
+    const wrap = imgWrapRef.current;
+    const img  = imgRef.current;
+    if (!wrap || !img) return;
 
-    const wrap = wrapEl.getBoundingClientRect();
-    const imgR = imgEl.getBoundingClientRect();
+    // wrapper 실제 크기
+    const wrapW = wrap.clientWidth || 1;
+    const wrapH = wrap.clientHeight || 1;
 
-    setImgOverlay({
-      offX: Math.round(imgR.left - wrap.left),
-      offY: Math.round(imgR.top  - wrap.top),
-      drawW: Math.round(imgR.width),
-      drawH: Math.round(imgR.height),
-    });
+    // 이미지가 object-contain + w-auto + max-h 로 렌더된 실제 크기
+    const drawW = img.naturalWidth && img.naturalHeight
+      ? Math.min(wrapW, Math.round(img.naturalWidth * Math.min(wrapW / img.naturalWidth, wrapH / img.naturalHeight)))
+      : img.clientWidth || img.offsetWidth || wrapW;
+
+    const drawH = img.naturalWidth && img.naturalHeight
+      ? Math.min(wrapH, Math.round(img.naturalHeight * Math.min(wrapW / img.naturalWidth, wrapH / img.naturalHeight)))
+      : img.clientHeight || img.offsetHeight || wrapH;
+
+    // 레터박스 오프셋 (센터 정렬)
+    const offX = Math.floor((wrapW - drawW) / 2);
+    const offY = Math.floor((wrapH - drawH) / 2);
+
+    setImgOverlay({ drawW, drawH, offX, offY });
   }, []);
 
 
@@ -217,28 +225,6 @@ export default function Analyze() {
       imgRef.current?.removeEventListener('load', onLoad);
     };
   }, [calcOverlay]);
-
-  // ✅ 관찰자/리스너 세팅
-  useLayoutEffect(() => {
-    const roWrap = new ResizeObserver(() => calcOverlay());
-    if (imgWrapRef.current) roWrap.observe(imgWrapRef.current);
-
-    const imgEl = imgRef.current;
-    const onLoad = () => calcOverlay();
-    imgEl?.addEventListener('load', onLoad);
-
-    window.addEventListener('resize', calcOverlay);
-
-    // 최초 1회 계산
-    calcOverlay();
-
-    return () => {
-      roWrap.disconnect();
-      window.removeEventListener('resize', calcOverlay);
-      imgEl?.removeEventListener('load', onLoad);
-    };
-  }, [calcOverlay]);
-
 
   useEffect(() => {
     calcOverlay();
@@ -546,7 +532,7 @@ export default function Analyze() {
                   />
                   {imgOverlay && selected?.result?.length ? (
                     <div
-                      className="absolute pointer-events-none z-10"
+                      className="absolute pointer-events-none z-10 overflow-hidden"
                       style={{
                         left: imgOverlay.offX,
                         top: imgOverlay.offY,
