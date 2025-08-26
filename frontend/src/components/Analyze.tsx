@@ -534,8 +534,7 @@ export default function Analyze() {
                 </div>
               ) : (
                 // 이미지 + 박스
-                <div ref={imgWrapRef} className="relative w-full h-full flex justify-center items-center">
-                  {imgOverlay && (
+                <div ref={imgWrapRef} className="relative w-full h-full flex justify-center items-center">(
                     <div
                       className="absolute"
                       style={{
@@ -587,7 +586,6 @@ export default function Analyze() {
                         </div>
                       ) : null}
                     </div>
-                  )}
                   </div>
                 )
               )}
