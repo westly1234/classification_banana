@@ -639,25 +639,40 @@ class SimpleTracker:
         used_det = set()
         for t in self.tracks:
             best_j, best_iou = -1, 0.0
-            tb = {"x":t.x,"y":t.y,"width":t.w,"height":t.h}
+            tb = {"x": t.x, "y": t.y, "width": t.w, "height": t.h}
             for j, d in enumerate(dets):
-                if j in used_det: continue
+                if j in used_det:
+                    continue
                 iou = _iou(tb, d["boundingBox"])
-                if iou > best_iou: best_iou, best_j = iou, j
+                if iou > best_iou:
+                    best_iou, best_j = iou, j
             if best_j >= 0 and best_iou >= self.iou_th:
                 self._update_track(t, dets[best_j], dt)
                 used_det.add(best_j)
             else:
                 t.miss += 1
 
+        # 3) 남은 탐지는 새 트랙으로 생성
+        for j, d in enumerate(dets):
+            if j in used_det:
+                continue
+            bb = d["boundingBox"]
+            lab = d.get("label") or d.get("ripeness") or ""
+            conf = float(d.get("confidence", 0.0))
+            t = _Track(bb, lab, conf, self._next_id)
+            self._next_id += 1
+            self.tracks.append(t)
+
+        # 4) 생존 / 크기 필터
         kept = []
         for t in self.tracks:
             if t.miss > self.max_age:
                 continue
-            if (t.w * t.h) < 0.0025:
+            if (t.w * t.h) < 0.0025:  # 너무 작으면 버림
                 continue
             kept.append(t)
         self.tracks = kept
+
         return [self._as_det(t) for t in self.tracks]
 
 # --- YOLO 분석 함수 (여러 객체 지원) ---
@@ -950,7 +965,7 @@ def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
 
 # ▼ Environment knobs
 SCROLL_FPS = int(os.getenv("SCROLL_FPS", "13"))
-SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.2"))
+SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6"))
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers for the scroll video pipeline
@@ -1167,7 +1182,7 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
     # ── 트래커: 부드럽게 + 잔상 최소화 세팅(필요시 아래 수치만 미세조정)
     tracker = SimpleTracker(
         iou_th=0.28,     # 매칭을 약간 보수적으로
-        max_age=5,       # 안 보이면 금방 제거(잔상 방지)
+        max_age=3,       # 안 보이면 금방 제거(잔상 방지)
         alpha_pos=0.55,  # 위치 부드럽게(낮추면 묵직, 올리면 민감)
         beta_pos=0.12,   # 속도 반영 정도
         alpha_size=0.35  # 크기 변화는 천천히
