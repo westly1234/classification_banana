@@ -19,7 +19,7 @@ from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request, status, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import List, Tuple, Dict
 
@@ -950,7 +950,6 @@ def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
 
 # ▼ Environment knobs
 SCROLL_FPS = int(os.getenv("SCROLL_FPS", "13"))
-SCROLL_SPEED_PX = float(os.getenv("SCROLL_SPEED_PX", "1.7"))
 SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.2"))
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -1041,13 +1040,6 @@ def draw_overlay(frame_bgr, detections, w=None, h=None):
 
     frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
-def decode_and_cover(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
-    arr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("이미지 디코딩 실패")
-    return resize_cover(img, dst_w, dst_h)
-
 def _iter_tiles_cover_from_manifest(manifest: List[Dict[str, str]], out_w: int, out_h: int):
     """디스크에서 바로 1장씩 읽어서 cover-resize 후 yield. 메모리 O(1)."""
     for m in manifest:
@@ -1097,8 +1089,11 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
         for right in it:
             # ✅ 정확히 frames_per_tile 프레임만 생성 (균등 보간)
             for n in range(frames_per_tile):
-                # 0 → view_w 까지를 균등하게 이동
-                off = min(view_w-1, round(n * (view_w-1) / frames_per_tile))
+                if frames_per_tile > 1:
+                    off = round(n * (view_w - 1) / (frames_per_tile - 1))
+                else:
+                    off = 0
+                off = min(view_w - 1, max(0, off))
                 frame = _compose_frame_from_tiles(left, right, off, view_w)
                 if using_ffmpeg: proc.stdin.write(frame.tobytes())
                 else:            vw.write(frame)
@@ -1164,15 +1159,15 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
             raise RuntimeError("cannot open output video (no ffmpeg and mp4v unsupported)")
 
     # ── 스크롤 속도(정상적인 길이/속도 유지)
-    frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
     env_speed = float(os.getenv("SCROLL_SPEED_PX", "0"))
-    pan_step_px = env_speed if env_speed > 0 else max(1, int(math.ceil(width / frames_per_tile)))
-    pan_step_norm = pan_step_px / float(width)
+    frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
+    pan_step_px = env_speed if env_speed > 0 else (width / frames_per_tile)
+    pan_step_norm = pan_step_px / float(width)       # 프레임당 정규화 이동량
 
     # ── 트래커: 부드럽게 + 잔상 최소화 세팅(필요시 아래 수치만 미세조정)
     tracker = SimpleTracker(
         iou_th=0.28,     # 매칭을 약간 보수적으로
-        max_age=3,       # 안 보이면 금방 제거(잔상 방지)
+        max_age=5,       # 안 보이면 금방 제거(잔상 방지)
         alpha_pos=0.55,  # 위치 부드럽게(낮추면 묵직, 올리면 민감)
         beta_pos=0.12,   # 속도 반영 정도
         alpha_size=0.35  # 크기 변화는 천천히
@@ -1202,12 +1197,13 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
                             H, W = frame.shape[:2]
                             names = r.names if hasattr(r, "names") else getattr(model, "names", {})
                             for (x1, y1, x2, y2), c, k in zip(xyxy, conf, cls):
-                                label = id_to_kor(names[int(k)]) if names else id_to_kor(int(k))
+                                names = r.names if hasattr(r, "names") else getattr(model, "names", {})
+                                label = id_to_kor(int(k))
                                 dets.append(
                                     pack_det(float(x1), float(y1), float(x2), float(y2), float(c), label, W, H)
                                 )
                     # 2) 탐지 프레임은 매칭+필터 업데이트
-                    dets_for_draw = tracker.step_with_dets(dets, dt, dx_norm=0.0)
+                    dets_for_draw = tracker.step_with_dets(dets, dt, dx_norm=-pan_step_norm)
                 else:
                     # 3) 스킵 프레임은 스크롤만큼 예측 이동(박스가 화면 밖으로 나가면 트래커가 제거)
                     tracker.predict_all(dt, dx_norm=-pan_step_norm)
@@ -1317,7 +1313,7 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
         h, w = img_bgr.shape[:2]
         new_w = 512
         new_h = max(1, int(h * (new_w / max(1, w))))
-        thumb_bgr = img_bgr
+        thumb_bgr = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
         thumb = cv2.imencode(".jpg", thumb_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])[1].tobytes()
 
         db = SessionLocal()
