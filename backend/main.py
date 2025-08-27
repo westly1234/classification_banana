@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import os, gc, asyncio, concurrent.futures, base64, uuid, threading, json, smtplib, pytz, subprocess, shutil, numpy as np
+import os, gc, torch, cv2, asyncio, concurrent.futures, base64, uuid, threading, json, smtplib, pytz, subprocess, shutil, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -385,7 +385,6 @@ os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 
 # 스레드 수 강제
 try:
-    import torch, cv2
     cv2.ocl.setUseOpenCL(False)
     torch.set_grad_enabled(False)
 except Exception:
