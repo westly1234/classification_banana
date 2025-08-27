@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import os, gc, torch, cv2, asyncio, concurrent.futures, base64, uuid, threading, json, smtplib, pytz, subprocess, shutil, numpy as np
+import os, gc, torch, cv2, asyncio, concurrent.futures, base64, uuid, math, threading, json, smtplib, pytz, subprocess, shutil, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -539,6 +539,113 @@ def pack_det(x1, y1, x2, y2, conf, cls_name, W, H):
         "confidence": float(conf),
     }
 
+# ---- Lightweight tracker (no deps) ----
+class _Track:
+    __slots__ = ("id","x","y","w","h","vx","vy","conf","label","_cand","age","miss")
+    def __init__(self, bb, label, conf, tid):
+        self.id = tid
+        self.x, self.y = bb["x"], bb["y"]
+        self.w, self.h = bb["width"], bb["height"]
+        self.vx = 0.0; self.vy = 0.0
+        self.conf = float(conf)
+        self.label = label
+        self._cand = {"label": label, "streak": 1, "conf": float(conf)}
+        self.age = 0
+        self.miss = 0
+
+def _iou(bb1, bb2):
+    ax1, ay1 = bb1["x"], bb1["y"]; ax2, ay2 = ax1+bb1["width"], ay1+bb1["height"]
+    bx1, by1 = bb2["x"], bb2["y"]; bx2, by2 = bx1+bb2["width"], by1+bb2["height"]
+    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = ix*iy
+    uni = bb1["width"]*bb1["height"] + bb2["width"]*bb2["height"] - inter
+    return inter/uni if uni>0 else 0.0
+
+class SimpleTracker:
+    def __init__(self, iou_th=0.26, max_age=8, alpha_pos=0.55, beta_pos=0.12, alpha_size=0.35):
+        self.tracks: list[_Track] = []
+        self._next_id = 1
+        self.iou_th = iou_th
+        self.max_age = max_age
+        self.alpha_pos = alpha_pos
+        self.beta_pos = beta_pos
+        self.alpha_size = alpha_size
+
+    def _predict(self, tr: _Track, dt: float, dx_norm: float):
+        tr.x += tr.vx*dt + dx_norm
+        tr.y += tr.vy*dt
+        # clamp
+        tr.x = max(0.0, min(1.0, tr.x))
+        tr.y = max(0.0, min(1.0, tr.y))
+        tr.w = max(0.0, min(1.0 - tr.x, tr.w))
+        tr.h = max(0.0, min(1.0 - tr.y, tr.h))
+        tr.age += 1
+
+    def predict_all(self, dt: float, dx_norm: float):
+        for t in self.tracks: self._predict(t, dt, dx_norm)
+
+    def _update_track(self, tr: _Track, det: dict, dt: float):
+        bb = det["boundingBox"]
+        # residuals
+        rx = bb["x"] - tr.x;  ry = bb["y"] - tr.y
+        rw = bb["width"] - tr.w;  rh = bb["height"] - tr.h
+        # alpha-beta
+        a, b, asz = self.alpha_pos, self.beta_pos, self.alpha_size
+        tr.x += a*rx; tr.y += a*ry
+        tr.w += asz*rw; tr.h += asz*rh
+        tr.vx += (b/dt)*rx; tr.vy += (b/dt)*ry
+        # conf EMA
+        tr.conf = 0.6*tr.conf + 0.4*float(det.get("confidence", 0.0))
+        # label hysteresis: 두 프레임 연속 + conf가 기존보다 의미 있게 높을 때만 교체
+        lab = det.get("label") or det.get("ripeness")
+        if lab == tr._cand["label"]:
+            tr._cand["streak"] += 1
+            tr._cand["conf"] = max(tr._cand["conf"], float(det.get("confidence", 0.0)))
+        else:
+            tr._cand = {"label": lab, "streak": 1, "conf": float(det.get("confidence", 0.0))}
+        if tr._cand["label"] != tr.label and tr._cand["streak"] >= 2 and tr._cand["conf"] >= tr.conf + 0.08:
+            tr.label = tr._cand["label"]; tr.conf = 0.7*tr.conf + 0.3*tr._cand["conf"]
+
+        tr.miss = 0
+
+    def _as_det(self, tr: _Track) -> dict:
+        return {
+            "boundingBox": {"x": tr.x, "y": tr.y, "width": tr.w, "height": tr.h},
+            "label": tr.label, "ripeness": tr.label, "confidence": float(tr.conf)
+        }
+
+    def step_with_dets(self, dets: list[dict], dt: float, dx_norm: float) -> list[dict]:
+        # 1) predict
+        for t in self.tracks: self._predict(t, dt, dx_norm)
+
+        # 2) greedy IoU match
+        used_det = set()
+        for t in self.tracks:
+            best_j, best_iou = -1, 0.0
+            tb = {"x":t.x,"y":t.y,"width":t.w,"height":t.h}
+            for j, d in enumerate(dets):
+                if j in used_det: continue
+                iou = _iou(tb, d["boundingBox"])
+                if iou > best_iou: best_iou, best_j = iou, j
+            if best_j >= 0 and best_iou >= self.iou_th:
+                self._update_track(t, dets[best_j], dt)
+                used_det.add(best_j)
+            else:
+                t.miss += 1
+
+        # 3) new tracks for unmatched dets
+        for j, d in enumerate(dets):
+            if j in used_det: continue
+            tr = _Track(d["boundingBox"], d.get("label") or d.get("ripeness",""), d.get("confidence",0.0), self._next_id)
+            self._next_id += 1
+            self.tracks.append(tr)
+
+        # 4) drop stale
+        self.tracks = [t for t in self.tracks if t.miss <= self.max_age]
+
+        return [self._as_det(t) for t in self.tracks]
+
 # --- YOLO 분석 함수 (여러 객체 지원) ---
 def letterbox_image(img, target_width, target_height):
     h, w = img.shape[:2]
@@ -1051,26 +1158,27 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
         if not vw.isOpened(): raise RuntimeError("VideoWriter open failed")
 
     frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
-    step = max(1, int(SCROLL_SPEED_PX))
+    env_speed = int(os.getenv("SCROLL_SPEED_PX", "0"))
+    if env_speed > 0:
+        frames_per_tile = max(1, int(math.ceil(view_w / env_speed)))
 
     try:
-        wrote_any = False
         for right in it:
-            for off in range(0, view_w, step):
+            # ✅ 정확히 frames_per_tile 프레임만 생성 (균등 보간)
+            for n in range(frames_per_tile):
+                # 0 → view_w 까지를 균등하게 이동
+                off = min(view_w-1, round(n * (view_w-1) / frames_per_tile))
                 frame = _compose_frame_from_tiles(left, right, off, view_w)
                 if using_ffmpeg: proc.stdin.write(frame.tobytes())
                 else:            vw.write(frame)
-                wrote_any = True
-            # 다음 경계로 이동
             left = right
-            # 스트리밍이므로 참조 해제
             del right, frame
-        # 마지막 타일 hold
+
+        # 꼬리 hold
         hold = max(0, int(TAIL_HOLD_FRAMES))
         for _ in range(hold):
             if using_ffmpeg: proc.stdin.write(left.tobytes())
             else:            vw.write(left)
-        wrote_any = True
     finally:
         if using_ffmpeg:
             try: proc.stdin.close()
@@ -1093,6 +1201,7 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS) or SCROLL_FPS
+    dt     = 1.0 / max(1.0, float(fps))
 
     using_ffmpeg, proc, out = False, None, None
     if FFMPEG_BIN and USE_FFMPEG:
@@ -1117,13 +1226,11 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
             raise RuntimeError("cannot open output video (no ffmpeg and mp4v unsupported)")
     frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
     env_speed = int(os.getenv("SCROLL_SPEED_PX", "0"))
-    pan_step_px = env_speed if env_speed > 0 else max(1, width // frames_per_tile)
+    pan_step_px = env_speed if env_speed > 0 else max(1, int(math.ceil(width / frames_per_tile)))
     pan_step_norm = pan_step_px / float(width)
 
     try:
-        # ✅ 루프 밖에서 상태 유지 (프레임 간 스무딩/시프트에 필요)
-        last_smooth: List[Dict] = []
-        last_det_i: int = -1
+        tracker = SimpleTracker(iou_th=0.26, max_age=8, alpha_pos=0.55, beta_pos=0.12, alpha_size=0.35)
 
         with torch.inference_mode():
             i = 0 
@@ -1150,18 +1257,15 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
                             for (x1, y1, x2, y2), c, k in zip(xyxy, conf, cls):
                                 cls_name = id_to_kor(names[int(k)]) if names else id_to_kor(int(k))
                                 dets.append(pack_det(float(x1), float(y1), float(x2), float(y2), float(c), cls_name, W, H))
-                    # 🔧 EMA 스무딩 적용
-                    dets_for_draw = _ema_match(last_smooth, dets, alpha=0.22) if last_smooth else dets
-                    last_smooth = dets_for_draw
-                    last_det_i = i
+                    dets_for_draw = tracker.step_with_dets(dets, dt, dx_norm=0.0)
                 else:
-                    # 추론하지 않는 프레임은 스크롤 만큼 평행이동(라벨 유지)
-                    if last_smooth and last_det_i >= 0:
-                        since = i - last_det_i
-                        dx_norm = - since * pan_step_norm
-                        dets_for_draw = _shift_norm_boxes(last_smooth, dx_norm)
-                    else:
-                        dets_for_draw = None
+                    # 프레임 건너뛰는 동안: 스크롤만큼 좌로 이동 예측
+                    tracker.predict_all(dt, dx_norm=-pan_step_norm)
+                    dets_for_draw = [ 
+                        {"boundingBox":{"x":t.x,"y":t.y,"width":t.w,"height":t.h},
+                         "label":t.label,"ripeness":t.label,"confidence":float(t.conf)}
+                        for t in tracker.tracks
+                    ]
 
                 if dets_for_draw:
                     draw_overlay(frame, dets_for_draw, width, height)
