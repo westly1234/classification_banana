@@ -1055,6 +1055,37 @@ def draw_overlay(frame_bgr, detections, w=None, h=None):
 
     frame_bgr[:] = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
+FAST_OVERLAY_CV = os.getenv("FAST_OVERLAY_CV","1") == "1"
+
+def draw_overlay_cv(frame_bgr, detections, w=None, h=None):
+    if not detections: return
+    h = h or frame_bgr.shape[0]
+    w = w or frame_bgr.shape[1]
+    thickness = max(2, min(6, (w + h) // 400))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.4, min(0.8, (w + h) / 2000.0))
+    for d in detections:
+        bb = d.get("boundingBox") or {}
+        nx = max(0.0, min(1.0, float(bb.get("x", 0.0))))
+        ny = max(0.0, min(1.0, float(bb.get("y", 0.0))))
+        nw = max(0.0, min(1.0 - nx, float(bb.get("width", 0.0))))
+        nh = max(0.0, min(1.0 - ny, float(bb.get("height", 0.0))))
+        x1 = int(round(nx * w)); y1 = int(round(ny * h))
+        x2 = int(round((nx + nw) * w)); y2 = int(round((ny + nh) * h))
+        x1 = max(0, min(w - 2, x1)); y1 = max(0, min(h - 2, y1))
+        x2 = max(x1 + 1, min(w - 1, x2)); y2 = max(y1 + 1, min(h - 1, y2))
+
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0,255,255), thickness)
+
+        label = f"{d.get('label') or d.get('ripeness','')} {float(d.get('confidence',0.0))*100:.1f}%".strip()
+        if not label: continue
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, 1)
+        bx, by = x1, y1 - th - 6
+        if by < 0: by = y1 + th + 6
+        # 라벨 배경
+        cv2.rectangle(frame_bgr, (bx, by - th - 6), (bx + tw + 8, by), (0,0,0), -1)
+        cv2.putText(frame_bgr, label, (bx + 4, by - 4), font, font_scale, (255,255,255), 1, cv2.LINE_AA)
+
 def _iter_tiles_cover_from_manifest(manifest: List[Dict[str, str]], out_w: int, out_h: int):
     """디스크에서 바로 1장씩 읽어서 cover-resize 후 yield. 메모리 O(1)."""
     for m in manifest:
@@ -1083,7 +1114,7 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
     if FFMPEG_BIN and USE_FFMPEG: 
         cmd = [FFMPEG_BIN,"-y","-loglevel","error","-f","rawvideo","-pix_fmt","bgr24",
                "-s", f"{view_w}x{view_h}","-r", str(fps), "-i","-",
-               "-c:v","libx264","-preset","ultrafast","-crf","30",
+               "-c:v","libx264","-preset","ultrafast","-crf","26",
                "-threads","1","-max_muxing_queue_size","64","-bufsize","2M",
                "-pix_fmt","yuv420p","-movflags","+faststart", out_path]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
@@ -1156,7 +1187,7 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
             FFMPEG_BIN, "-y", "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-s", f"{width}x{height}", "-r", str(fps), "-i", "-",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
             "-threads", "1", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             output_path,
         ]
@@ -1233,7 +1264,10 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
 
                 # 4) 그리기
                 if dets_for_draw:
-                    draw_overlay(frame, dets_for_draw, width, height)
+                    if FAST_OVERLAY_CV:
+                        draw_overlay_cv(frame, dets_for_draw, width, height)
+                    else:
+                        draw_overlay(frame, dets_for_draw, width, height)
 
                 # 5) 출력
                 if using_ffmpeg:
