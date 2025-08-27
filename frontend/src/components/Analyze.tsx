@@ -588,7 +588,7 @@ export default function Analyze() {
                   />
 
                   {/* 박스는 오버레이 위에만 얹음 */}
-                  {imgOverlay && boxes.length ? (
+                  {imgOverlay && selected?.result?.length ? (
                     <div
                       className="absolute pointer-events-none overflow-hidden z-10"
                       style={{
@@ -600,16 +600,8 @@ export default function Analyze() {
                     >
                       <div className="absolute inset-0">
                         {boxes.map((det: any, i: number) => {
-                          // 1) 평탄형(smoothDets 또는 내가 만든 플랫 구조) vs boundingBox 둘 다 지원
-                          const b = det.boundingBox
-                            ? det.boundingBox
-                            : { x: det.x ?? 0, y: det.y ?? 0, width: det.w ?? 0, height: det.h ?? 0 };
-
-                          // 2) 라벨도 title 우선 → 없으면 label/ripeness
-                          const title =
-                            det.title ?? det.label ?? det.ripeness ?? det.className ?? det.class ?? '';
-
                           const { drawW, drawH } = imgOverlay;
+                          const b  = det?.boundingBox || {};
                           const nx = Math.max(0, Math.min(1, Number(b.x)      || 0));
                           const ny = Math.max(0, Math.min(1, Number(b.y)      || 0));
                           const nw = Math.max(0, Math.min(1 - nx, Number(b.width)  || 0));
@@ -626,7 +618,7 @@ export default function Analyze() {
                           const x = Math.round(x1), y = Math.round(y1);
                           const w = Math.round(x2 - x1), h = Math.round(y2 - y1);
 
-                          const conf = Number(det.conf ?? det.confidence ?? 0) * 100;
+                          const title = det.label ?? det.ripeness ?? det.className ?? det.class ?? '';
                           const LABEL_H = 18;
                           const labelTop = y - LABEL_H >= 0 ? -LABEL_H : 0;
 
@@ -643,21 +635,19 @@ export default function Analyze() {
                                 zIndex: 10 + i,  
                               }}
                             >
-                              {!!title &&(
-                                <div
-                                  className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
-                                  style={{
-                                    left: 0,
-                                    top: labelTop,  // 박스 위에 공간 있으면 위로, 없으면 안쪽
-                                    maxWidth: '100%',
-                                    whiteSpace: 'nowrap',
-                                    overflow: 'hidden',
-                                    textOverflow: 'ellipsis',
-                                  }}
-                                >
-                                  {title} {conf.toFixed(1)}%
-                                </div>
-                              )}
+                              <div
+                                className="absolute bg-black/80 text-white text-xs px-1.5 rounded"
+                                style={{
+                                  left: 0,
+                                  top: labelTop,  // 박스 위에 공간 있으면 위로, 없으면 안쪽
+                                  maxWidth: '100%',
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                }}
+                              >
+                                {title} {Number(det.confidence * 100).toFixed(1)}%
+                              </div>
                             </div>
                           );
                         })}
