@@ -1,6 +1,6 @@
 # --- 📁 backend/main.py ---
 
-import os, asyncio, concurrent.futures, base64, uuid, threading, json, smtplib, pytz, cv2, torch, subprocess, shutil, numpy as np
+import os, gc, asyncio, concurrent.futures, base64, uuid, threading, json, smtplib, pytz, subprocess, shutil, numpy as np
 from datetime import datetime, timedelta, date, time as dtime
 from pytz import timezone
 from pathlib import Path
@@ -385,15 +385,9 @@ os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 
 # 스레드 수 강제
 try:
-    import cv2
-    cv2.setNumThreads(1)
-except Exception:
-    pass
-
-try:
-    import torch
-    torch.set_num_threads(1)      # PyTorch 내부 스레드
-    torch.set_num_interop_threads(1)
+    import torch, cv2
+    cv2.ocl.setUseOpenCL(False)
+    torch.set_grad_enabled(False)
 except Exception:
     pass
 
@@ -1128,14 +1122,12 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
     pan_step_norm = pan_step_px / float(width)
 
     try:
-        import torch, gc
-        torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
-
         # ✅ 루프 밖에서 상태 유지 (프레임 간 스무딩/시프트에 필요)
         last_smooth: List[Dict] = []
         last_det_i: int = -1
 
         with torch.inference_mode():
+            i = 0 
             while True:
                 ret, frame = cap.read()
                 if not ret:

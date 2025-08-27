@@ -362,7 +362,7 @@ export default function Analyze() {
       }
   }
   const analyzeMultipleImagesAsVideo = (statesToAnalyze: WithFile[]): Promise<void> =>
-    new Promise(async (reject) => {
+    new Promise<void>(async (resolve, reject) => {
       setTaskStatus('이미지 분석 및 동영상 생성 요청 중...');
       const idsToAnalyze = new Set(statesToAnalyze.map(s => s.id));
       setAnalysisStates(prev =>
@@ -434,6 +434,7 @@ export default function Analyze() {
               } else {
                 setTaskStatus('오류: 동영상 생성 실패');
               }
+              resolve();
             }
           } catch (pollError) {
             if (pollRef.current) clearInterval(pollRef.current);
