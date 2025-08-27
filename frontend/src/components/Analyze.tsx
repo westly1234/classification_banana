@@ -103,15 +103,15 @@ export default function Analyze() {
   const pollRef = useRef<number | null>(null);
   const [serverSettings, setServerSettings] = useState<ServerSettings | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
-
   const hasSelectedItems = analysisStates.some(s => s.isSelected);
   const selected = analysisStates.find(s => s.id === activeId) || null;
   const hasDetectionsInSelected = (selected?.result?.length ?? 0) > 0;
   const savedActive = sessionStorage.getItem('activeId');
   const savedViewer = sessionStorage.getItem('mainViewerUrl');
 
-  const [vidMeta, setVidMeta] = useState<{ w: number; h: number }>({ w: 4, h: 3 });
-
+  const isVideo = !!videoUrl; 
+  // 백엔드에서 준 view_w/view_h가 있으면 그걸 사용(없으면 4/3 기본)
+  const [viewSize] = useState<{w:number,h:number}|null>(null);
   const leftColRef = useRef<HTMLDivElement | null>(null);
   const [leftColH] = useState(0);
   const imgWrapRef = useRef<HTMLDivElement | null>(null);
@@ -171,16 +171,9 @@ export default function Analyze() {
   }, [mainViewerUrl]);
 
   useEffect(() => {
-    const savedAbs = sessionStorage.getItem('lastVideoUrlAbs');
-    if (savedAbs) {
-      setVideoUrl(savedAbs);
-      setMainViewerUrl(savedAbs);
-      setTaskStatus('이전 동영상 분석 결과를 불러왔습니다.');
-      return;
-    }
     const savedRel = sessionStorage.getItem('lastVideoUrl');
     if (savedRel) {
-      const absolute = api.getUri({ url: savedRel });
+      const absolute = api.getUri({ url: savedRel }); // baseURL로 복원
       const withTs = `${absolute}?t=${Date.now()}`;
       setVideoUrl(withTs);
       setMainViewerUrl(withTs);
@@ -434,9 +427,9 @@ export default function Analyze() {
                 const absolute = data.absolute_result ?? api.getUri({ url: finalRel });
                 const once = absolute + `?t=${Date.now()}`;     // ✅ 1회만 버스터
 
-                setVideoUrl(once);
-                setMainViewerUrl(once)
-                sessionStorage.setItem('lastVideoUrl', once);
+                setVideoUrl(prev => prev ?? once);              // ✅ 이미 있으면 유지(재시작 방지)
+                setMainViewerUrl(prev => prev ?? once);
+                sessionStorage.setItem('lastVideoUrl', finalRel);
                 setTaskStatus(null);
               } else {
                 setTaskStatus('오류: 동영상 생성 실패');
@@ -545,7 +538,7 @@ export default function Analyze() {
               (mainViewerUrl === videoUrl ? (
                 <div
                   className="w-full max-w-full rounded-lg overflow-hidden bg-black"
-                  style={{ aspectRatio: `${vidMeta.w} / ${vidMeta.h}` }} 
+                  style={{ aspectRatio: isVideo ? '16 / 9' : (viewSize ? `${viewSize.w} / ${viewSize.h}` : '4 / 3') }}
                 >
                   <video
                     key={videoUrl || ''}
@@ -557,14 +550,6 @@ export default function Analyze() {
                     loop={false}
                     muted
                     className="w-full h-full object-contain rounded-lg bg-black"
-                    onLoadedMetadata={(e) => {
-                      const v = e.currentTarget;
-                      const w = v.videoWidth || 4;
-                      const h = v.videoHeight || 3;
-                      // 0이나 NaN 방지
-                      setVidMeta(prev => (w > 0 && h > 0 ? { w, h } : prev));
-                      v.playbackRate = 0.9; // 필요 시 조절
-                    }}
                     onEnded={e => {
                       e.currentTarget.pause();
                       e.currentTarget.currentTime = e.currentTarget.duration;
@@ -678,9 +663,9 @@ export default function Analyze() {
                 <div
                   key={state.id}
                   onClick={() => {
-                    if (isAnalyzing && videoUrl) return; // 분석/랜더링 중엔 뷰어를 영상에서 빼지 않음
-                      setActiveId(state.id);
-                      setMainViewerUrl(state.previewUrl);
+                    if (isAnalyzing) return;
+                    setActiveId(state.id);
+                    setMainViewerUrl(state.previewUrl);
                   }}
                   className={`relative flex-shrink-0 w-36 h-40 sm:w-40 sm:h-44 md:w-44 md:h-48 rounded-xl overflow-hidden cursor-pointer group border-2 ${
                     mainViewerUrl === state.previewUrl
