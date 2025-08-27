@@ -836,11 +836,70 @@ def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
 
 # ▼ Environment knobs
 SCROLL_FPS = int(os.getenv("SCROLL_FPS", "13"))
+SCROLL_SPEED_PX = int(os.getenv("SCROLL_SPEED_PX", "2"))
 SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6"))
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers for the scroll video pipeline
 # ────────────────────────────────────────────────────────────────────────────────
+
+# IoU 계산
+_DEF_IOU_THRESH = 0.3
+
+def _iou_norm(a: Dict, b: Dict) -> float:
+    ax, ay, aw, ah = a["boundingBox"]["x"], a["boundingBox"]["y"], a["boundingBox"]["width"], a["boundingBox"]["height"]
+    bx, by, bw, bh = b["boundingBox"]["x"], b["boundingBox"]["y"], b["boundingBox"]["width"], b["boundingBox"]["height"]
+    ax2, ay2 = ax + aw, ay + ah
+    bx2, by2 = bx + bw, by + bh
+    ix = max(0.0, min(ax2, bx2) - max(ax, bx))
+    iy = max(0.0, min(ay2, by2) - max(ay, by))
+    inter = ix * iy
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+# helper: 이전 스무딩 결과(last_smooth)와 새 탐지(dets)를 매칭 후 EMA 스무딩
+# prev, curr: [{ boundingBox:{x,y,width,height}, label, confidence }]
+# alpha: 0~1 (클수록 새 박스에 더 민감)
+def _ema_match(prev: List[Dict], curr: List[Dict], alpha: float = 0.25, iou_th: float = 0.2) -> List[Dict]:
+    out: List[Dict] = []
+    used = set()
+    for n in curr:
+        # prev 중 가장 IoU 큰 것 찾기
+        best_k, best_iou = -1, 0.0
+        for k, p in enumerate(prev):
+            if k in used:
+                continue
+            v = _iou_norm(p, n)
+            if v > best_iou:
+                best_iou, best_k = v, k
+        if best_iou >= iou_th and best_k >= 0:
+            used.add(best_k)
+            p = prev[best_k]
+            # EMA: 좌표/크기만 스무딩. 라벨은 새 라벨 유지(없으면 이전거)
+            px, py = p["boundingBox"]["x"], p["boundingBox"]["y"]
+            pw, ph = p["boundingBox"]["width"], p["boundingBox"]["height"]
+            nx, ny = n["boundingBox"]["x"], n["boundingBox"]["y"]
+            nw, nh = n["boundingBox"]["width"], n["boundingBox"]["height"]
+            sx = px * (1 - alpha) + nx * alpha
+            sy = py * (1 - alpha) + ny * alpha
+            sw = pw * (1 - alpha) + nw * alpha
+            sh = ph * (1 - alpha) + nh * alpha
+            out.append({
+                "boundingBox": {
+                    "x": max(0.0, min(1.0, sx)),
+                    "y": max(0.0, min(1.0, sy)),
+                    "width": max(0.0, min(1.0 - max(0.0, min(1.0, sx)), sw)),
+                    "height": max(0.0, min(1.0 - max(0.0, min(1.0, sy)), sh)),
+                },
+                "label": n.get("label") or p.get("label"),
+                "ripeness": n.get("ripeness", p.get("ripeness")),
+                "confidence": float(n.get("confidence", p.get("confidence", 0.0))),
+            })
+        else:
+            # 새 박스: 그대로 채택
+            out.append(n)
+    return out
 
 def _shift_norm_boxes(dets: list, dx_norm: float) -> list:
     """정규화 박스들을 x방향으로 dx_norm만큼 평행이동(+클램프)."""
@@ -999,7 +1058,7 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
         if not vw.isOpened(): raise RuntimeError("VideoWriter open failed")
 
     frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
-    step = max(1, view_w // frames_per_tile)
+    step = max(1, int(SCROLL_SPEED_PX))
 
     try:
         wrote_any = False
@@ -1032,14 +1091,15 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
 FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "4"))               
 VIDEO_INFER_SIZE = int(os.getenv("VIDEO_INFER_SIZE", "512"))
 
+# ----- 비디오 감지 및 쓰기 -----
 def detect_video_and_write(input_path: str, output_path: str) -> None:
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
         raise RuntimeError("cannot open input video")
 
-    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps    = cap.get(cv2.CAP_PROP_FPS) or SCROLL_FPS
+    fps = cap.get(cv2.CAP_PROP_FPS) or SCROLL_FPS
 
     using_ffmpeg, proc, out = False, None, None
     if FFMPEG_BIN and USE_FFMPEG:
@@ -1062,17 +1122,19 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
         if not out.isOpened():
             cap.release()
             raise RuntimeError("cannot open output video (no ffmpeg and mp4v unsupported)")
-
     frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
-    pan_step_px = max(1, width // frames_per_tile)
+    env_speed = int(os.getenv("SCROLL_SPEED_PX", "0"))
+    pan_step_px = env_speed if env_speed > 0 else max(1, width // frames_per_tile)
     pan_step_norm = pan_step_px / float(width)
 
     try:
         import torch, gc
         torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
 
-        i = 0
-        last_dets, last_det_i = None, -1
+        # ✅ 루프 밖에서 상태 유지 (프레임 간 스무딩/시프트에 필요)
+        last_smooth: List[Dict] = []
+        last_det_i: int = -1
+
         with torch.inference_mode():
             while True:
                 ret, frame = cap.read()
@@ -1084,48 +1146,56 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
 
                 if run_detect:
                     results = model(frame, imgsz=VIDEO_INFER_SIZE, conf=FINAL_CONF, verbose=False)
-                    dets = []
+                    dets: List[Dict] = []
                     if results:
                         r = results[0]
                         boxes = getattr(r, "boxes", None)
                         if boxes is not None and boxes.xyxy is not None:
                             xyxy = boxes.xyxy.cpu().numpy()
                             conf = boxes.conf.cpu().numpy()
-                            cls  = boxes.cls.cpu().numpy().astype(int)
+                            cls = boxes.cls.cpu().numpy().astype(int)
                             H, W = frame.shape[:2]
                             names = r.names if hasattr(r, "names") else getattr(model, "names", {})
                             for (x1, y1, x2, y2), c, k in zip(xyxy, conf, cls):
                                 cls_name = id_to_kor(names[int(k)]) if names else id_to_kor(int(k))
-                                dets.append(pack_det(float(x1), float(y1), float(x2), float(y2),
-                                                    float(c), cls_name, W, H))
-                    last_dets, last_det_i = dets, i
-                    dets_for_draw = dets
+                                dets.append(pack_det(float(x1), float(y1), float(x2), float(y2), float(c), cls_name, W, H))
+                    # 🔧 EMA 스무딩 적용
+                    dets_for_draw = _ema_match(last_smooth, dets, alpha=0.22) if last_smooth else dets
+                    last_smooth = dets_for_draw
+                    last_det_i = i
                 else:
-                    if last_dets is not None and last_det_i >= 0:
+                    # 추론하지 않는 프레임은 스크롤 만큼 평행이동(라벨 유지)
+                    if last_smooth and last_det_i >= 0:
                         since = i - last_det_i
                         dx_norm = - since * pan_step_norm
-                        dets_for_draw = _shift_norm_boxes(last_dets, dx_norm)
+                        dets_for_draw = _shift_norm_boxes(last_smooth, dx_norm)
+                    else:
+                        dets_for_draw = None
 
                 if dets_for_draw:
                     draw_overlay(frame, dets_for_draw, width, height)
 
-                if using_ffmpeg: proc.stdin.write(frame.tobytes())
-                else:            out.write(frame)
+                if using_ffmpeg:
+                    proc.stdin.write(frame.tobytes())
+                else:
+                    out.write(frame)
 
                 if (i % 32) == 0:
                     gc.collect()
-                i += 1
+                i += 1        
     finally:
         cap.release()
         if using_ffmpeg:
-            try: proc.stdin.close()
-            except: pass
+            try:
+                proc.stdin.close()
+            except:
+                pass
             proc.wait(timeout=30)
         else:
             out.release()
 
+
 def create_scroll_then_detect_video(current_user, task_id: str, manifest: List[Dict[str, str]]) -> None:
-    view_w, view_h = TARGET_W, TARGET_H
     raw_video_path   = RESULTS_DIR / f"{task_id}_raw.mp4"
     final_video_path = RESULTS_DIR / f"{task_id}_final.mp4"
 
