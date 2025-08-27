@@ -951,6 +951,12 @@ def decode_and_cover(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
     img = decode_bgr(img_bytes)                # ★ 방향 먼저 맞추고
     return resize_cover(img, dst_w, dst_h)     # 그다음 cover로 자르기
 
+LETTERBOX_MODE = os.getenv("LETTERBOX_MODE","0")=="1"
+
+def decode_and_fit(img_bytes: bytes, dst_w: int, dst_h: int) -> np.ndarray:
+    img = decode_bgr(img_bytes)
+    return letterbox_image(img, dst_w, dst_h) if LETTERBOX_MODE else resize_cover(img, dst_w, dst_h)
+
 # --- 여백 없이 정사이즈로 맞추기(cover)
 def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
     h, w = img_bgr.shape[:2]
@@ -1091,7 +1097,7 @@ def _iter_tiles_cover_from_manifest(manifest: List[Dict[str, str]], out_w: int, 
     for m in manifest:
         with open(m["path"], "rb") as fp:
             data = fp.read()
-        yield decode_and_cover(data, out_w, out_h)
+        yield decode_and_fit(data, out_w, out_h)
 
 def _compose_frame_from_tiles(tile_left: np.ndarray, tile_right: np.ndarray, offset: int, view_w: int) -> np.ndarray:
     left_part  = tile_left[:, offset:view_w]
@@ -1450,7 +1456,7 @@ async def start_video_analysis(
         try:
             with open(itm["path"], "rb") as fp:
                 data = fp.read()
-            bgr  = await loop.run_in_executor(EXECUTOR, decode_and_cover, data, TARGET_W, TARGET_H)
+            bgr  = await loop.run_in_executor(EXECUTOR, decode_and_fit, data, TARGET_W, TARGET_H)
             dets = await loop.run_in_executor(EXECUTOR, run_yolo_np_bgr, bgr, (MODEL_W, MODEL_H,), FINAL_CONF, 100)
             avg_conf = round(sum(d["confidence"] for d in dets) / len(dets), 4) if dets else 0.0
             image_results.append({"filename": itm["filename"], "detections": dets, "avg_confidence": avg_conf, "processed": True})
@@ -1475,7 +1481,7 @@ async def start_video_analysis(
                 for itm in batch:
                     with open(itm["path"], "rb") as fp:
                         data = fp.read()
-                    img = decode_and_cover(data, TARGET_W, TARGET_H)
+                    img = decode_and_fit(data, TARGET_W, TARGET_H)
                     batch_imgs.append(img)
                     batch_names.append(itm["filename"])
 
