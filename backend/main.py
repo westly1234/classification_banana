@@ -563,27 +563,43 @@ def _iou(bb1, bb2):
     return inter/uni if uni>0 else 0.0
 
 class SimpleTracker:
-    def __init__(self, iou_th=0.26, max_age=8, alpha_pos=0.55, beta_pos=0.12, alpha_size=0.35):
-        self.tracks: list[_Track] = []
+    def __init__(self, iou_th=0.26, max_age=3, alpha_pos=0.55, beta_pos=0.12, alpha_size=0.35,
+                 off_margin=0.02):
+        self.tracks = []
         self._next_id = 1
         self.iou_th = iou_th
-        self.max_age = max_age
+        self.max_age = max_age         # 🔻 더 짧게: 중복 잔상 방지
         self.alpha_pos = alpha_pos
         self.beta_pos = beta_pos
         self.alpha_size = alpha_size
+        self.off_margin = off_margin   # 화면 밖 판정 여유
 
-    def _predict(self, tr: _Track, dt: float, dx_norm: float):
-        tr.x += tr.vx*dt + dx_norm
-        tr.y += tr.vy*dt
-        # clamp
-        tr.x = max(0.0, min(1.0, tr.x))
-        tr.y = max(0.0, min(1.0, tr.y))
-        tr.w = max(0.0, min(1.0 - tr.x, tr.w))
-        tr.h = max(0.0, min(1.0 - tr.y, tr.h))
+    def _predict(self, tr, dt, dx_norm):
+        # 클램프 전 '진짜 위치'로 이동
+        nx = tr.x + tr.vx*dt + dx_norm
+        ny = tr.y + tr.vy*dt
+        x2 = nx + tr.w
+        y2 = ny + tr.h
+
+        # ⬇️ 완전히 화면 밖이면 즉시 제거되도록 miss 크게
+        if (x2 < -self.off_margin or nx > 1.0 + self.off_margin or
+            y2 < -self.off_margin or ny > 1.0 + self.off_margin):
+            tr.miss = self.max_age + 1
+            return
+
+        # 화면 안쪽 클램핑 + 경계에 걸친 부분은 폭/높이 줄여 '자르기'
+        if nx < 0.0:
+            tr.w = max(0.0, tr.w + nx); nx = 0.0
+        if ny < 0.0:
+            tr.h = max(0.0, tr.h + ny); ny = 0.0
+        tr.x = min(1.0, nx); tr.y = min(1.0, ny)
+        tr.w = min(1.0 - tr.x, tr.w)
+        tr.h = min(1.0 - tr.y, tr.h)
         tr.age += 1
 
-    def predict_all(self, dt: float, dx_norm: float):
-        for t in self.tracks: self._predict(t, dt, dx_norm)
+    def predict_all(self, dt, dx_norm):
+        for t in self.tracks:
+            self._predict(t, dt, dx_norm)
 
     def _update_track(self, tr: _Track, det: dict, dt: float):
         bb = det["boundingBox"]
@@ -634,16 +650,14 @@ class SimpleTracker:
             else:
                 t.miss += 1
 
-        # 3) new tracks for unmatched dets
-        for j, d in enumerate(dets):
-            if j in used_det: continue
-            tr = _Track(d["boundingBox"], d.get("label") or d.get("ripeness",""), d.get("confidence",0.0), self._next_id)
-            self._next_id += 1
-            self.tracks.append(tr)
-
-        # 4) drop stale
-        self.tracks = [t for t in self.tracks if t.miss <= self.max_age]
-
+        kept = []
+        for t in self.tracks:
+            if t.miss > self.max_age:
+                continue
+            if (t.w * t.h) < 0.0025:
+                continue
+            kept.append(t)
+        self.tracks = kept
         return [self._as_det(t) for t in self.tracks]
 
 # --- YOLO 분석 함수 (여러 객체 지원) ---
@@ -936,95 +950,12 @@ def resize_cover(img_bgr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
 
 # ▼ Environment knobs
 SCROLL_FPS = int(os.getenv("SCROLL_FPS", "13"))
-SCROLL_SPEED_PX = int(os.getenv("SCROLL_SPEED_PX", "2"))
-SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.6"))
+SCROLL_SPEED_PX = float(os.getenv("SCROLL_SPEED_PX", "1.7"))
+SECONDS_PER_TILE = float(os.getenv("SECONDS_PER_TILE", "1.2"))
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Helpers for the scroll video pipeline
 # ────────────────────────────────────────────────────────────────────────────────
-
-# IoU 계산
-_DEF_IOU_THRESH = 0.3
-
-def _iou_norm(a: Dict, b: Dict) -> float:
-    ax, ay, aw, ah = a["boundingBox"]["x"], a["boundingBox"]["y"], a["boundingBox"]["width"], a["boundingBox"]["height"]
-    bx, by, bw, bh = b["boundingBox"]["x"], b["boundingBox"]["y"], b["boundingBox"]["width"], b["boundingBox"]["height"]
-    ax2, ay2 = ax + aw, ay + ah
-    bx2, by2 = bx + bw, by + bh
-    ix = max(0.0, min(ax2, bx2) - max(ax, bx))
-    iy = max(0.0, min(ay2, by2) - max(ay, by))
-    inter = ix * iy
-    union = aw * ah + bw * bh - inter
-    return inter / union if union > 0 else 0.0
-
-
-# helper: 이전 스무딩 결과(last_smooth)와 새 탐지(dets)를 매칭 후 EMA 스무딩
-# prev, curr: [{ boundingBox:{x,y,width,height}, label, confidence }]
-# alpha: 0~1 (클수록 새 박스에 더 민감)
-def _ema_match(prev: List[Dict], curr: List[Dict], alpha: float = 0.25, iou_th: float = 0.2) -> List[Dict]:
-    out: List[Dict] = []
-    used = set()
-    for n in curr:
-        # prev 중 가장 IoU 큰 것 찾기
-        best_k, best_iou = -1, 0.0
-        for k, p in enumerate(prev):
-            if k in used:
-                continue
-            v = _iou_norm(p, n)
-            if v > best_iou:
-                best_iou, best_k = v, k
-        if best_iou >= iou_th and best_k >= 0:
-            used.add(best_k)
-            p = prev[best_k]
-            # EMA: 좌표/크기만 스무딩. 라벨은 새 라벨 유지(없으면 이전거)
-            px, py = p["boundingBox"]["x"], p["boundingBox"]["y"]
-            pw, ph = p["boundingBox"]["width"], p["boundingBox"]["height"]
-            nx, ny = n["boundingBox"]["x"], n["boundingBox"]["y"]
-            nw, nh = n["boundingBox"]["width"], n["boundingBox"]["height"]
-            sx = px * (1 - alpha) + nx * alpha
-            sy = py * (1 - alpha) + ny * alpha
-            sw = pw * (1 - alpha) + nw * alpha
-            sh = ph * (1 - alpha) + nh * alpha
-            out.append({
-                "boundingBox": {
-                    "x": max(0.0, min(1.0, sx)),
-                    "y": max(0.0, min(1.0, sy)),
-                    "width": max(0.0, min(1.0 - max(0.0, min(1.0, sx)), sw)),
-                    "height": max(0.0, min(1.0 - max(0.0, min(1.0, sy)), sh)),
-                },
-                "label": n.get("label") or p.get("label"),
-                "ripeness": n.get("ripeness", p.get("ripeness")),
-                "confidence": float(n.get("confidence", p.get("confidence", 0.0))),
-            })
-        else:
-            # 새 박스: 그대로 채택
-            out.append(n)
-    return out
-
-def _shift_norm_boxes(dets: list, dx_norm: float) -> list:
-    """정규화 박스들을 x방향으로 dx_norm만큼 평행이동(+클램프)."""
-    out = []
-    for d in dets or []:
-        bb = d.get("boundingBox") or {}
-        x = float(bb.get("x", 0.0)) + dx_norm
-        y = float(bb.get("y", 0.0))
-        w = float(bb.get("width", 0.0))
-        h = float(bb.get("height", 0.0))
-        # 경계 클램프 및 우측 넘침 보정
-        x = max(0.0, min(1.0, x))
-        w = max(0.0, min(1.0 - x, w))
-
-        raw_label = d.get("label")
-        title = raw_label if raw_label else _map_ripeness(d.get("ripeness"))
-
-        out.append({
-            "boundingBox": {"x": x, "y": max(0.0, min(1.0, y)),
-                            "width": w, "height": max(0.0, min(1.0 - y, h))},
-            "label": title,             
-            "ripeness": d.get("ripeness", title),           
-            "confidence": float(d.get("confidence", 0.0)),
-        })
-    return out
 
 # 최소한의 오버레이(박스/라벨) 함수 — 한글 폰트, 경계 클램프 포함
 def draw_overlay(frame_bgr, detections, w=None, h=None):
@@ -1158,7 +1089,7 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
         if not vw.isOpened(): raise RuntimeError("VideoWriter open failed")
 
     frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
-    env_speed = int(os.getenv("SCROLL_SPEED_PX", "0"))
+    env_speed = float(os.getenv("SCROLL_SPEED_PX", "0"))
     if env_speed > 0:
         frames_per_tile = max(1, int(math.ceil(view_w / env_speed)))
 
@@ -1189,20 +1120,26 @@ def _write_scroll_video_stream_raw_streaming(manifest: List[Dict[str, str]], out
         del left
         import gc; gc.collect()
 
-FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "4"))               
+FRAME_STRIDE = int(os.getenv("FRAME_STRIDE", "3"))               
 VIDEO_INFER_SIZE = int(os.getenv("VIDEO_INFER_SIZE", "512"))
 
 # ----- 비디오 감지 및 쓰기 -----
 def detect_video_and_write(input_path: str, output_path: str) -> None:
+    """
+    - YOLO는 FRAME_STRIDE마다만 돌리고(추론 절약),
+    - 그 사이 프레임은 트래커가 스크롤 속도만큼 예측 이동시켜 '부드럽게' 이어줌.
+    - 화면 밖으로 나간 박스는 즉시 잘려 사라짐(트래커 내부 로직).
+    """
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
         raise RuntimeError("cannot open input video")
 
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or SCROLL_FPS
+    fps    = cap.get(cv2.CAP_PROP_FPS) or SCROLL_FPS
     dt     = 1.0 / max(1.0, float(fps))
 
+    # ── 출력 준비(FFmpeg 우선)
     using_ffmpeg, proc, out = False, None, None
     if FFMPEG_BIN and USE_FFMPEG:
         cmd = [
@@ -1210,10 +1147,11 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
             "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-s", f"{width}x{height}", "-r", str(fps), "-i", "-",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-threads", "1", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             output_path,
         ]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if proc.stdin is None:
             cap.release()
             raise RuntimeError("failed to open ffmpeg stdin")
@@ -1224,52 +1162,69 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
         if not out.isOpened():
             cap.release()
             raise RuntimeError("cannot open output video (no ffmpeg and mp4v unsupported)")
+
+    # ── 스크롤 속도(정상적인 길이/속도 유지)
     frames_per_tile = max(1, int(round(SECONDS_PER_TILE * fps)))
-    env_speed = int(os.getenv("SCROLL_SPEED_PX", "0"))
+    env_speed = float(os.getenv("SCROLL_SPEED_PX", "0"))
     pan_step_px = env_speed if env_speed > 0 else max(1, int(math.ceil(width / frames_per_tile)))
     pan_step_norm = pan_step_px / float(width)
 
-    try:
-        tracker = SimpleTracker(iou_th=0.26, max_age=8, alpha_pos=0.55, beta_pos=0.12, alpha_size=0.35)
+    # ── 트래커: 부드럽게 + 잔상 최소화 세팅(필요시 아래 수치만 미세조정)
+    tracker = SimpleTracker(
+        iou_th=0.28,     # 매칭을 약간 보수적으로
+        max_age=3,       # 안 보이면 금방 제거(잔상 방지)
+        alpha_pos=0.55,  # 위치 부드럽게(낮추면 묵직, 올리면 민감)
+        beta_pos=0.12,   # 속도 반영 정도
+        alpha_size=0.35  # 크기 변화는 천천히
+    )
 
+    try:
         with torch.inference_mode():
-            i = 0 
+            i = 0
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
 
                 run_detect = (i % FRAME_STRIDE == 0)
-                dets_for_draw = None
 
                 if run_detect:
+                    # 1) YOLO 추론
                     results = model(frame, imgsz=VIDEO_INFER_SIZE, conf=FINAL_CONF, verbose=False)
-                    dets: List[Dict] = []
+                    dets = []
                     if results:
                         r = results[0]
                         boxes = getattr(r, "boxes", None)
                         if boxes is not None and boxes.xyxy is not None:
                             xyxy = boxes.xyxy.cpu().numpy()
                             conf = boxes.conf.cpu().numpy()
-                            cls = boxes.cls.cpu().numpy().astype(int)
+                            cls  = boxes.cls.cpu().numpy().astype(int)
                             H, W = frame.shape[:2]
                             names = r.names if hasattr(r, "names") else getattr(model, "names", {})
                             for (x1, y1, x2, y2), c, k in zip(xyxy, conf, cls):
-                                cls_name = id_to_kor(names[int(k)]) if names else id_to_kor(int(k))
-                                dets.append(pack_det(float(x1), float(y1), float(x2), float(y2), float(c), cls_name, W, H))
+                                label = id_to_kor(names[int(k)]) if names else id_to_kor(int(k))
+                                dets.append(
+                                    pack_det(float(x1), float(y1), float(x2), float(y2), float(c), label, W, H)
+                                )
+                    # 2) 탐지 프레임은 매칭+필터 업데이트
                     dets_for_draw = tracker.step_with_dets(dets, dt, dx_norm=0.0)
                 else:
-                    # 프레임 건너뛰는 동안: 스크롤만큼 좌로 이동 예측
+                    # 3) 스킵 프레임은 스크롤만큼 예측 이동(박스가 화면 밖으로 나가면 트래커가 제거)
                     tracker.predict_all(dt, dx_norm=-pan_step_norm)
-                    dets_for_draw = [ 
-                        {"boundingBox":{"x":t.x,"y":t.y,"width":t.w,"height":t.h},
-                         "label":t.label,"ripeness":t.label,"confidence":float(t.conf)}
+                    dets_for_draw = [
+                        {
+                            "boundingBox": {"x": t.x, "y": t.y, "width": t.w, "height": t.h},
+                            "label": t.label, "ripeness": t.label,
+                            "confidence": float(t.conf),
+                        }
                         for t in tracker.tracks
                     ]
 
+                # 4) 그리기
                 if dets_for_draw:
                     draw_overlay(frame, dets_for_draw, width, height)
 
+                # 5) 출력
                 if using_ffmpeg:
                     proc.stdin.write(frame.tobytes())
                 else:
@@ -1277,7 +1232,7 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
 
                 if (i % 32) == 0:
                     gc.collect()
-                i += 1        
+                i += 1
     finally:
         cap.release()
         if using_ffmpeg:
@@ -1288,7 +1243,6 @@ def detect_video_and_write(input_path: str, output_path: str) -> None:
             proc.wait(timeout=30)
         else:
             out.release()
-
 
 def create_scroll_then_detect_video(current_user, task_id: str, manifest: List[Dict[str, str]]) -> None:
     raw_video_path   = RESULTS_DIR / f"{task_id}_raw.mp4"
