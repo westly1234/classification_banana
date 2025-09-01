@@ -875,14 +875,21 @@ def update_daily_analysis_stat(db: Session, target_date: date):
     label_score = LABEL_SCORE
 
     start_dt = datetime.combine(target_date, dtime.min).astimezone(KST)
-    end_dt = datetime.combine(target_date, dtime.max).astimezone(KST)
+    end_dt   = datetime.combine(target_date, dtime.max).astimezone(KST)
 
+    # A) 오늘 생성된 전체 레코드(영상 포함) → 총 건수
+    total_today = db.query(Analysis).filter(
+        Analysis.created_at >= start_dt,
+        Analysis.created_at <= end_dt
+    ).count()
+
+    # B) 평균/다양성 계산은 '비디오분석 제외' + 유효 confidence만
     records = db.query(Analysis).filter(
         Analysis.created_at >= start_dt,
         Analysis.created_at <= end_dt,
         Analysis.ripeness != "비디오분석",
         Analysis.confidence.isnot(None),
-        Analysis.confidence > 0
+        Analysis.confidence > 0.0
     ).all()
 
     if not records:
@@ -891,25 +898,23 @@ def update_daily_analysis_stat(db: Session, target_date: date):
             stat = DailyAnalysisStat(date=target_date)
             db.add(stat)
 
-        stat.total_count = 0
-        stat.accuracy = 0.0
-        stat.freshness = 0.0
-        stat.variety_count = 0
-
+        stat.total_count  = total_today
+        stat.accuracy     = 0.0
+        stat.freshness    = 0.0
+        stat.variety_count= 0
         db.commit()
         return
 
-    total = len(records)
-    avg_conf = sum(r.confidence for r in records) / total
+    # 평균 정확도
+    avg_conf = sum(r.confidence for r in records) / len(records)
+    if avg_conf > 1.0:  # 잘못된 % 저장 보정
+        avg_conf = avg_conf / 100.0
+    avg_conf_percent = avg_conf * 100.0
 
-    # ✅ 정확도 보정 로직 (100 넘으면 잘못 저장된 값이므로 1로 나눠서 보정)
-    if avg_conf > 1.0:
-        print(f"[경고] 평균 confidence 값 {avg_conf}가 1.0 초과 → 100 나눠서 보정함")
-        avg_conf = avg_conf / 100
+    # 평균 신선도(라벨 점수 기반)
+    avg_fresh = sum(label_score.get(r.ripeness, 0) for r in records) / len(records)
 
-    avg_conf_percent = avg_conf * 100
-
-    avg_fresh = sum(label_score.get(r.ripeness, 0) for r in records) / total
+    # 다양성(서로 다른 라벨 수)
     variety = len(set(r.ripeness for r in records))
 
     stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == target_date).first()
@@ -917,12 +922,11 @@ def update_daily_analysis_stat(db: Session, target_date: date):
         stat = DailyAnalysisStat(date=target_date)
         db.add(stat)
 
-    stat.total_count = total
-    stat.accuracy = round(avg_conf_percent, 2)  # 퍼센트로 저장
-    stat.freshness = round(avg_fresh, 2)
+    stat.total_count   = total_today          # ← 전체(영상 포함)
+    stat.accuracy      = round(avg_conf_percent, 2)
+    stat.freshness     = round(avg_fresh, 2)
     stat.variety_count = variety
-
-    db.commit() 
+    db.commit()
 
 # --- 📹 비동기 작업 및 동영상 생성 ---
 def decode_bgr(img_bytes: bytes) -> np.ndarray:
@@ -1272,7 +1276,7 @@ def create_scroll_then_detect_video(current_user, task_id: str, manifest: List[D
     try:
         username = getattr(current_user, "nickname", None) or "unknown"
         db.add(Analysis(
-            username=username, ripeness="영상기반",
+            username=username, ripeness="비디오분석",
             confidence=0.0, freshness=0.0,
             video_path=f"/results/{final_video_path.name}",
             video_blob=None, created_at=datetime.now(timezone("Asia/Seoul")),
@@ -1465,6 +1469,16 @@ async def start_video_analysis(
                     set_task_db(db, task_id, status="PROCESSING", image_results=sorted_results)
                 del batch_imgs, det_lists
                 import gc; gc.collect()
+                
+            with SessionLocal() as db:
+                for m in manifest:
+                    r = name_to_result.get(m["filename"])
+                    if not r:
+                        continue
+                    # 이미지 한 장의 탐지 결과를 오늘자 박스 카운트에 반영
+                    increment_daily_box_counts(db, r.get("detections", []))
+                # 일일 통계도(총 건수·평균 등) 재계산
+                update_daily_analysis_stat(db, datetime.now(KST).date())
 
             # --- 최종 비디오---
             create_scroll_then_detect_video(current_user, task_id, manifest)
@@ -1638,6 +1652,7 @@ def get_summary_stats():
     db = SessionLocal()
     try:
         today = datetime.now(KST).date()
+        update_daily_analysis_stat(db, today)
         yesterday = today - timedelta(days=1)
 
         today_stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == today).first()
