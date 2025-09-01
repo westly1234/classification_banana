@@ -1,11 +1,4 @@
 // src/components/Analyze.tsx
-// ✅ 이미지/동영상이 "새로고침"이나 "다른 탭"에서도 살아있도록 전면 개선
-// - 미디어(이미지 미리보기용 Blob)를 sessionStorage(Data URL) → IndexedDB(Blob) 저장으로 교체
-// - 메타데이터(activeId, mainViewerUrl, lastVideoUrl, strip 순서)는 localStorage로 영구 보존
-// - 새 탭에서도 동일 계정/도메인이라면 localStorage 동기화(storage 이벤트)로 즉시 복원
-// - Object URL은 새로고침 시 사라지므로, 마운트 때 IndexedDB Blob로부터 재생성
-// - 삭제/전체삭제 시 IndexedDB와 localStorage를 함께 정리
-
 import { useLayoutEffect, useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -205,7 +198,6 @@ export default function Analyze() {
         const orderRaw = localStorage.getItem(LS_KEYS.order);
         const ids: string[] = orderRaw ? JSON.parse(orderRaw) : [];
         const savedActive = localStorage.getItem(LS_KEYS.activeId);
-        const savedViewer = localStorage.getItem(LS_KEYS.mainViewerUrl);
         const savedRel = localStorage.getItem(LS_KEYS.lastVideoRel);
 
         // 1) 이미지 스트립 복원
@@ -239,15 +231,15 @@ export default function Analyze() {
           const absolute = api.getUri({ url: savedRel });
           const withTs = `${absolute}?t=${Date.now()}`;
           setVideoUrl(withTs);
-          // 뷰어가 비디오를 가리키고 있었다면 유지
-          const isViewerVideo = savedViewer && savedRel && savedViewer.includes(savedRel);
-          if (isViewerVideo) setMainViewerUrl(withTs);
+          setMainViewerUrl(withTs);
           setTaskStatus('이전 동영상 분석 결과를 불러왔습니다.');
+        } else {
+          // 비디오가 없을 때만 첫 이미지로
+          setMainViewerUrl(restored[0]?.previewUrl ?? null);
         }
 
         // 3) 뷰어/액티브 복원
         setActiveId(savedActive ?? (ids.length ? ids[0] : null));
-        setMainViewerUrl((prev) => prev ?? (savedViewer || (restored[0]?.previewUrl ?? null)));
       } catch (e) {
         console.warn('복원 실패', e);
       }
@@ -271,8 +263,11 @@ export default function Analyze() {
   }, [activeId]);
 
   useEffect(() => {
-    if (mainViewerUrl) localStorage.setItem(LS_KEYS.mainViewerUrl, mainViewerUrl);
+    if (!mainViewerUrl) return;
+    if (mainViewerUrl.startsWith('blob:')) return;
+    localStorage.setItem(LS_KEYS.mainViewerUrl, mainViewerUrl);
   }, [mainViewerUrl]);
+
 
   useEffect(() => {
     const order = analysisStates.map((s) => s.id);
@@ -501,8 +496,8 @@ export default function Analyze() {
                 const finalRel = data.result; // "/results/xxx.mp4"
                 const absolute = data.absolute_result ?? api.getUri({ url: finalRel });
                 const once = absolute + `?t=${Date.now()}`;
-                setVideoUrl((prev) => prev ?? once);
-                setMainViewerUrl((prev) => prev ?? once);
+                setVideoUrl(once);
+                setMainViewerUrl(once);
                 localStorage.setItem(LS_KEYS.lastVideoRel, finalRel);
                 setTaskStatus(null);
               } else {

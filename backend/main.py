@@ -873,58 +873,47 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 # 통계 갱신 전용 함수
 def update_daily_analysis_stat(db: Session, target_date: date):
     label_score = LABEL_SCORE
-
     start_dt = datetime.combine(target_date, dtime.min).astimezone(KST)
     end_dt   = datetime.combine(target_date, dtime.max).astimezone(KST)
 
-    # A) 오늘 생성된 전체 레코드(영상 포함) → 총 건수
+    # 총 건수(영상 포함)
     total_today = db.query(Analysis).filter(
         Analysis.created_at >= start_dt,
         Analysis.created_at <= end_dt
     ).count()
 
-    # B) 평균/다양성 계산은 '비디오분석 제외' + 유효 confidence만
+    # 평균/다양성은 '비디오분석' 제외 + 유효 confidence
     records = db.query(Analysis).filter(
         Analysis.created_at >= start_dt,
         Analysis.created_at <= end_dt,
         Analysis.ripeness != "비디오분석",
-        Analysis.confidence.isnot(None),
-        Analysis.confidence > 0.0
+        Analysis.confidence.isnot(None)
     ).all()
-
-    if not records:
-        stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == target_date).first()
-        if not stat:
-            stat = DailyAnalysisStat(date=target_date)
-            db.add(stat)
-
-        stat.total_count  = total_today
-        stat.accuracy     = 0.0
-        stat.freshness    = 0.0
-        stat.variety_count= 0
-        db.commit()
-        return
-
-    # 평균 정확도
-    avg_conf = sum(r.confidence for r in records) / len(records)
-    if avg_conf > 1.0:  # 잘못된 % 저장 보정
-        avg_conf = avg_conf / 100.0
-    avg_conf_percent = avg_conf * 100.0
-
-    # 평균 신선도(라벨 점수 기반)
-    avg_fresh = sum(label_score.get(r.ripeness, 0) for r in records) / len(records)
-
-    # 다양성(서로 다른 라벨 수)
-    variety = len(set(r.ripeness for r in records))
 
     stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == target_date).first()
     if not stat:
         stat = DailyAnalysisStat(date=target_date)
         db.add(stat)
 
-    stat.total_count   = total_today          # ← 전체(영상 포함)
-    stat.accuracy      = round(avg_conf_percent, 2)
-    stat.freshness     = round(avg_fresh, 2)
+    if not records:
+        stat.total_count = total_today
+        stat.accuracy = 0.0
+        stat.freshness = 0.0
+        stat.variety_count = 0
+        db.commit()
+        return
+
+    avg_conf = sum(r.confidence for r in records) / len(records)  # 0~1
+    if avg_conf > 1.0:
+        avg_conf = avg_conf / 100.0
+    avg_conf_percent = avg_conf * 100.0
+
+    avg_fresh = sum(label_score.get(r.ripeness, 0) for r in records) / len(records)
+    variety   = len(set(r.ripeness for r in records))
+
+    stat.total_count   = total_today
+    stat.accuracy      = round(avg_conf_percent, 2)  # %
+    stat.freshness     = round(avg_fresh, 2)         # 0~100 점수
     stat.variety_count = variety
     db.commit()
 
@@ -1469,15 +1458,35 @@ async def start_video_analysis(
                     set_task_db(db, task_id, status="PROCESSING", image_results=sorted_results)
                 del batch_imgs, det_lists
                 import gc; gc.collect()
-                
+
             with SessionLocal() as db:
+                username = getattr(current_user, "nickname", None) or "unknown"
                 for m in manifest:
                     r = name_to_result.get(m["filename"])
                     if not r:
                         continue
-                    # 이미지 한 장의 탐지 결과를 오늘자 박스 카운트에 반영
-                    increment_daily_box_counts(db, r.get("detections", []))
-                # 일일 통계도(총 건수·평균 등) 재계산
+                    dets = r.get("detections", []) or []
+
+                    # 1) 파이/다양성 집계
+                    increment_daily_box_counts(db, dets)
+
+                    # 2) 일일 정확도/신선도 계산용 레코드 적재(이미지 1장 = Analysis 1행)
+                    avg_conf  = float(r.get("avg_confidence") or (
+                        (sum(d.get("confidence", 0.0) for d in dets) / len(dets)) if dets else 0.0
+                    ))
+                    rep       = max(dets, key=lambda d: d.get("confidence", 0.0)) if dets else None
+                    rep_label = rep.get("ripeness") if rep else "분석불가"
+                    avg_fresh = float((sum(d.get("freshness", 0.0) for d in dets) / len(dets)) if dets else 0.0)
+
+                    db.add(Analysis(
+                        username=username,
+                        ripeness=rep_label,
+                        confidence=avg_conf,   # 0.0~1.0
+                        freshness=avg_fresh,   # 0.0~1.0
+                        image_blob=None,
+                        created_at=datetime.now(KST),
+                    ))
+                db.commit()
                 update_daily_analysis_stat(db, datetime.now(KST).date())
 
             # --- 최종 비디오---
