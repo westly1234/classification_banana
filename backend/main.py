@@ -1690,8 +1690,8 @@ def get_summary_stats():
     try:
         today = datetime.now(KST).date()
         update_daily_analysis_stat(db, today)
-        yesterday = today - timedelta(days=1)
-
+        db.commit()
+        
         today_stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == today).first()
         yest_stat = (
             db.query(DailyAnalysisStat)
@@ -1699,6 +1699,12 @@ def get_summary_stats():
             .order_by(DailyAnalysisStat.date.desc())
             .first()
         )
+
+        latest = db.query(DailyAnalysisStat).order_by(DailyAnalysisStat.date.desc()).first()
+        print(f"[SUMMARY] today={today}")
+        print(f"[SUMMARY] today_stat={today_stat}")
+        print(f"[SUMMARY] yest_stat={yest_stat}")
+        print(f"[SUMMARY] latest_stat_row={latest}")
 
         total_count = db.query(func.count(Analysis.id)).scalar()
 
@@ -1752,6 +1758,31 @@ def get_summary_stats():
         raise
     finally:
         db.close()
+
+@stats_router.get("/stats/summary")
+def get_stats_summary(db: Session = Depends(get_db)):
+    today_kst = datetime.now(KST).date()
+    print(f"[SUMMARY] today_kst={today_kst}")
+
+    stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == today_kst).first()
+    print(f"[SUMMARY] stat_row={stat}")
+
+    if stat:
+        print(
+            f"[SUMMARY] row values total={stat.total_count}, "
+            f"acc={stat.accuracy}, fresh={stat.freshness}, variety={stat.variety_count}"
+        )
+    else:
+        print("[SUMMARY] no stat row for today_kst")
+
+    payload = {
+        "today_count": stat.total_count if stat else 0,
+        "avg_accuracy_today": stat.accuracy if stat else 0.0,
+        "avg_freshness_today": stat.freshness if stat else 0.0,
+        "variety_today": stat.variety_count if stat else 0,
+    }
+    print(f"[SUMMARY] payload={payload}")
+    return payload
 
 def ensure_admin_user():
     admin_email = os.getenv("ADMIN_EMAIL")
