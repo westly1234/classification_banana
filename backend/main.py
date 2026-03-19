@@ -1689,6 +1689,8 @@ def get_summary_stats():
     db = SessionLocal()
     try:
         today = datetime.now(KST).date()
+        yesterday = today - timedelta(days=1)
+        
         update_daily_analysis_stat(db, today)
         db.commit()
         
