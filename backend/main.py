@@ -900,7 +900,6 @@ def update_daily_analysis_stat(db: Session, target_date: date):
         stat.accuracy = 0.0
         stat.freshness = 0.0
         stat.variety_count = 0
-        db.commit()
         return
 
     avg_conf = sum(r.confidence for r in records) / len(records)  # 0~1
@@ -915,8 +914,7 @@ def update_daily_analysis_stat(db: Session, target_date: date):
     stat.accuracy      = round(avg_conf_percent, 2)  # %
     stat.freshness     = round(avg_fresh, 2)         # 0~100 점수
     stat.variety_count = variety
-    db.commit()
-
+    
 # --- 📹 비동기 작업 및 동영상 생성 ---
 def decode_bgr(img_bytes: bytes) -> np.ndarray:
     """
@@ -1326,17 +1324,31 @@ async def analyze_single_image(payload: ImagePayload, current_user: User = Depen
 
         db = SessionLocal()
         try:
+            print("[SAVE] single analyze start")
+        
             db.add(Analysis(
                 username=current_user.nickname,
                 ripeness=detections[0]["ripeness"] if detections else "분석불가",
                 confidence=avg_conf,
                 freshness=avg_fresh,
-                image_blob=thumb,                         # <<< 여기!
+                image_blob=thumb,
                 created_at=datetime.now(KST)
             ))
+            print("[SAVE] Analysis row added")
+        
             increment_daily_box_counts(db, detections)
-            db.commit()
+            print("[SAVE] daily_box_count updated")
+        
             update_daily_analysis_stat(db, datetime.now(KST).date())
+            print("[SAVE] daily_analysis_stat updated")
+        
+            db.commit()
+            print("[SAVE] single analyze commit done")
+        
+        except Exception as e:
+            db.rollback()
+            print("[SAVE][ERROR] single analyze failed:", repr(e))
+            raise
         finally:
             db.close()
 
@@ -1461,33 +1473,42 @@ async def start_video_analysis(
 
             with SessionLocal() as db:
                 username = getattr(current_user, "nickname", None) or "unknown"
+                print(f"[BG] start save manifest_count={len(manifest)} username={username}")
+            
                 for m in manifest:
                     r = name_to_result.get(m["filename"])
                     if not r:
+                        print(f"[BG] skip no result filename={m['filename']}")
                         continue
+            
                     dets = r.get("detections", []) or []
-
-                    # 1) 파이/다양성 집계
+                    print(f"[BG] processing filename={m['filename']} det_count={len(dets)}")
+            
                     increment_daily_box_counts(db, dets)
-
-                    # 2) 일일 정확도/신선도 계산용 레코드 적재(이미지 1장 = Analysis 1행)
-                    avg_conf  = float(r.get("avg_confidence") or (
+                    print(f"[BG] daily_box_count updated filename={m['filename']}")
+            
+                    avg_conf = float(r.get("avg_confidence") or (
                         (sum(d.get("confidence", 0.0) for d in dets) / len(dets)) if dets else 0.0
                     ))
-                    rep       = max(dets, key=lambda d: d.get("confidence", 0.0)) if dets else None
+                    rep = max(dets, key=lambda d: d.get("confidence", 0.0)) if dets else None
                     rep_label = rep.get("ripeness") if rep else "분석불가"
                     avg_fresh = float((sum(d.get("freshness", 0.0) for d in dets) / len(dets)) if dets else 0.0)
-
+            
                     db.add(Analysis(
                         username=username,
                         ripeness=rep_label,
-                        confidence=avg_conf,   # 0.0~1.0
-                        freshness=avg_fresh,   # 0.0~1.0
+                        confidence=avg_conf,
+                        freshness=avg_fresh,
                         image_blob=None,
                         created_at=datetime.now(KST),
                     ))
-                db.commit()
+                    print(f"[BG] Analysis row added filename={m['filename']} ripeness={rep_label} conf={avg_conf} fresh={avg_fresh}")
+            
                 update_daily_analysis_stat(db, datetime.now(KST).date())
+                print("[BG] daily_analysis_stat updated")
+            
+                db.commit()
+                print("[BG] bg save commit done")
 
             # --- 최종 비디오---
             create_scroll_then_detect_video(current_user, task_id, manifest)
@@ -1522,7 +1543,6 @@ def increment_daily_box_counts(db: Session, detections: list):
     current.update(inc)
 
     row.counts_json = json.dumps(current, ensure_ascii=False)
-    db.commit()
 
 def increment_daily_box_counts_bulk(db: Session, frames_with_dets: List[Tuple[np.ndarray, list]]):
     today = datetime.now(KST).date()
