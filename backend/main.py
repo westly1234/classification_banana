@@ -1763,27 +1763,60 @@ def get_summary_stats():
 
 @stats_router.get("/stats/summary")
 def get_stats_summary(db: Session = Depends(get_db)):
-    today_kst = datetime.now(KST).date()
-    print(f"[SUMMARY] today_kst={today_kst}")
+    today = datetime.now(KST).date()
+    yesterday = today - timedelta(days=1)
 
-    stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == today_kst).first()
-    print(f"[SUMMARY] stat_row={stat}")
+    # 오늘 통계 최신화
+    update_daily_analysis_stat(db, today)
+    db.commit()
 
-    if stat:
-        print(
-            f"[SUMMARY] row values total={stat.total_count}, "
-            f"acc={stat.accuracy}, fresh={stat.freshness}, variety={stat.variety_count}"
-        )
-    else:
-        print("[SUMMARY] no stat row for today_kst")
+    # 오늘 / 어제 통계
+    today_stat = db.query(DailyAnalysisStat).filter(DailyAnalysisStat.date == today).first()
+    yest_stat = (
+        db.query(DailyAnalysisStat)
+        .filter(DailyAnalysisStat.date < today)
+        .order_by(DailyAnalysisStat.date.desc())
+        .first()
+    )
+
+    # 박스 기준 분포 / 다양성
+    box_today = db.query(DailyBoxCount).get(today)
+    today_box = json.loads(box_today.counts_json or "{}") if box_today else {}
+    ripeness_counts = {k: int(v) for k, v in today_box.items() if k != "비디오분석"}
+    today_variety = sum(1 for v in ripeness_counts.values() if int(v) > 0)
+
+    # 총 누적 분석
+    total_count = db.query(func.count(Analysis.id)).scalar()
+
+    # 값 안전 처리
+    today_count = today_stat.total_count if today_stat else 0
+    acc_today = round(today_stat.accuracy or 0, 2) if today_stat else 0.0
+    fresh_today = round(today_stat.freshness or 0, 2) if today_stat else 0.0
 
     payload = {
-        "today_count": stat.total_count if stat else 0,
-        "avg_accuracy_today": stat.accuracy if stat else 0.0,
-        "avg_freshness_today": stat.freshness if stat else 0.0,
-        "variety_today": stat.variety_count if stat else 0,
+        # 기존 /stats/summary 키
+        "today_count": today_count,
+        "avg_accuracy_today": acc_today,
+        "avg_freshness_today": fresh_today,
+        "variety_today": today_variety,
+
+        # /summary 쪽 키도 같이 반환해서 호환성 확보
+        "today": today_count,
+        "yesterday": yest_stat.total_count if yest_stat else 0,
+        "total": total_count,
+        "ripeness_counts": ripeness_counts,
+        "today_variety": today_variety,
+        "avg_confidence_today": acc_today,
+        "avg_confidence_yesterday": round(yest_stat.accuracy or 0, 2) if yest_stat else 0.0,
+        "avg_freshness_yesterday": round(yest_stat.freshness or 0, 2) if yest_stat else 0.0,
     }
+
+    print(f"[SUMMARY] today={today}")
+    print(f"[SUMMARY] today_stat={today_stat}")
+    print(f"[SUMMARY] yest_stat={yest_stat}")
+    print(f"[SUMMARY] ripeness_counts={ripeness_counts}")
     print(f"[SUMMARY] payload={payload}")
+
     return payload
 
 def ensure_admin_user():
