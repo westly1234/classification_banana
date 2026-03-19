@@ -475,12 +475,20 @@ def _heavy_init():
     try:
         db = SessionLocal()
         update_daily_analysis_stat(db, datetime.now(KST).date())
+        db.commit()
+        print("[STATS] startup daily stat committed")
+    
     except Exception as e:
-        print("❌ update_daily_analysis_stat at startup:", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print("❌ update_daily_analysis_stat at startup:", repr(e))
+    
     finally:
         try:
             db.close()
-        except:
+        except Exception:
             pass
 
 # 3-3) 스타트업에서 비동기 시작
