@@ -394,9 +394,9 @@ except Exception:
 def _heavy_init():
     global model, MODEL_READY, DB_READY
 
-    # ── 0) DB 준비
     try:
         init_db()
+        ensure_admin_user()
         DB_READY = True
         print("✅ DB init done")
     except Exception as e:
