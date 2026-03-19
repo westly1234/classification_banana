@@ -1742,7 +1742,7 @@ def ensure_admin_user():
             admin_user = User(
                 nickname=admin_nickname,
                 email=admin_email,
-                password_hash=get_password_hash(admin_password),
+                password_hash=password_hash(admin_password),
                 is_verified=1,
                 is_superuser=True,
             )
