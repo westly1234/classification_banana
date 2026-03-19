@@ -1725,6 +1725,53 @@ def get_summary_stats():
     finally:
         db.close()
 
+def ensure_admin_user():
+    admin_email = os.getenv("ADMIN_EMAIL")
+    admin_password = os.getenv("ADMIN_PASSWORD")
+    admin_nickname = os.getenv("ADMIN_NICKNAME", "admin")
+
+    if not admin_email or not admin_password:
+        print("⚠️ ADMIN_EMAIL / ADMIN_PASSWORD not set. Skip admin bootstrap.")
+        return
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == admin_email).first()
+
+        if user is None:
+            admin_user = User(
+                nickname=admin_nickname,
+                email=admin_email,
+                password_hash=get_password_hash(admin_password),
+                is_verified=1,
+                is_superuser=True,
+            )
+            db.add(admin_user)
+            db.commit()
+            print(f"✅ Admin created: {admin_email}")
+        else:
+            changed = False
+
+            if not user.is_superuser:
+                user.is_superuser = True
+                changed = True
+
+            if not user.is_verified:
+                user.is_verified = 1
+                changed = True
+
+            if changed:
+                db.commit()
+                print(f"✅ Admin promoted/verified: {admin_email}")
+            else:
+                print(f"ℹ️ Admin already exists: {admin_email}")
+
+    except Exception as e:
+        db.rollback()
+        print("❌ ensure_admin_user failed:", e)
+    finally:
+        db.close()
+
 # 서버 제한값을 환경변수화 + 프론트에 자동 전파
 
 @settings_router.get("")
